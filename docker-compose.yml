@@ -1,0 +1,24 @@
+services:
+  mongo:
+    image: mongo:7
+    container_name: nosql_logs_mongo
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_DATABASE: nosql_logs
+    volumes:
+      - mongo_data:/data/db
+
+  api:
+    build: ./api
+    container_name: nosql_logs_api
+    environment:
+      MONGO_URI: "mongodb://mongo:27017"
+      MONGO_DB: "nosql_logs"
+    ports:
+      - "8000:8000"
+    depends_on:
+      - mongo
+
+volumes:
+  mongo_data:
