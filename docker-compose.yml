@@ -20,5 +20,38 @@ services:
     depends_on:
       - mongo
 
+  ingest:
+    build: ./ingest
+    container_name: nosql_logs_ingest
+    environment:
+      MONGO_URI: "mongodb://mongo:27017"
+      MONGO_DB: "nosql_logs"
+    depends_on:
+      - mongo
+    volumes:
+      - ./input_logs:/input_logs:ro
+    command:
+      [
+        "python",
+        "mongo_ingest.py",
+        "--mongo-uri",
+        "mongodb://mongo:27017",
+        "--mongo-db",
+        "nosql_logs",
+        "--collection",
+        "logs",
+        "--batch-size",
+        "5000",
+        "--access",
+        "/input_logs/access_log_full",
+        "--datax",
+        "/input_logs/HDFS_DataXceiver.log",
+        "--namesys",
+        "/input_logs/HDFS_FS_Namesystem.log"
+      ]
+    restart: "no"
+
+
 volumes:
   mongo_data:
+  ingest_work:
