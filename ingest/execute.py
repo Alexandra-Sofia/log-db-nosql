@@ -1,7 +1,7 @@
 import os
 from multiprocessing import Process
 
-from ingest.config import (
+from config import (
     ACCESS_FILENAME,
     DATAX_FILENAME,
     NAMESYS_FILENAME,
@@ -13,12 +13,13 @@ from workers.dataxceiver_worker import parse_dataxceiver_worker
 from workers.namesystem_worker import parse_namesystem_worker
 
 def main(
-    logdir: str = "/input_logs",
-    mongo_uri: str = "mongodb://mongo:27017",
-    mongo_db: str = "nosql_logs",
-    mongo_coll: str = "logs",
+    logdir: str = os.getenv("LOG_DIR"),
+    mongo_uri: str = os.getenv("MONGO_URI"),
+    mongo_db: str = os.getenv("MONGO_DB"),
+    mongo_coll: str = os.getenv("MONGO_COLLECTION"),
     batch_size: int = BATCH_SIZE_DEFAULT,
 ) -> None:
+
     access_log = os.path.join(logdir, ACCESS_FILENAME)
     datax_log = os.path.join(logdir, DATAX_FILENAME)
     namesys_log = os.path.join(logdir, NAMESYS_FILENAME)

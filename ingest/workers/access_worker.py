@@ -3,9 +3,9 @@ from typing import Any, Dict, List
 
 from pymongo import MongoClient
 
-from ingest.timestamps import ts_apache, day_str
-from ingest.mongo_writer import flush_batch
-from ingest.util import tiny_logger, LogType
+from timestamps import ts_apache, day_str
+from writer import flush_batch
+from util import tiny_logger, LogType
 
 ACCESS_REGEX = re.compile(
     r'(?P<ip>\S+)\s+'

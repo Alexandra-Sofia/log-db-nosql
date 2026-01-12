@@ -1,3 +1,6 @@
+# Readme draft: mongo db log blabla
+
+## schema? or whatever its called in db design choices blabla
 {
   "_id": ObjectId,
 
@@ -21,3 +24,7 @@
 The data model follows MongoDB’s document-oriented design principles: each log entry is stored as a self-contained document optimized for aggregation, 
 while frequently queried attributes are denormalized to minimize joins and pipeline complexity. 
 Redundant fields such as the day string and upvote counters are intentionally introduced to improve query performance and simplify analytics.
+
+### Developer notes
+
+fixed an issue with the line endings in the namesystem log parsing that reduced the number of lines accepted significantly.

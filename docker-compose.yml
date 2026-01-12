@@ -1,7 +1,7 @@
 services:
   mongo:
     image: mongo:7
-    container_name: nosql_logs_mongo
+    container_name: mongo_db
     ports:
       - "27017:27017"
     environment:
@@ -9,49 +9,39 @@ services:
     volumes:
       - mongo_data:/data/db
 
-  api:
-    build: ./api
-    container_name: nosql_logs_api
-    environment:
-      MONGO_URI: "mongodb://mongo:27017"
-      MONGO_DB: "nosql_logs"
-    ports:
-      - "8000:8000"
-    depends_on:
-      - mongo
+#  api:
+#    build: ./api
+#    container_name: logdb_api
+#    environment:
+#      MONGO_URI: "mongodb://mongo:27017"
+#      MONGO_DB: "nosql_logs"
+#    ports:
+#      - "8000:8000"
+#    depends_on:
+#      - mongo
 
   ingest:
-    build: ./ingest
-    container_name: nosql_logs_ingest
+    build:
+      context: ./ingest
+      dockerfile: Dockerfile
+    container_name: logdb_ingest
     environment:
       MONGO_URI: "mongodb://mongo:27017"
       MONGO_DB: "nosql_logs"
+      MONGO_COLLECTION: "logs"
+      LOG_DIR: "/input-logfiles"
     depends_on:
       - mongo
     volumes:
-      - ./input_logs:/input_logs:ro
-    command:
-      [
-        "python",
-        "mongo_ingest.py",
-        "--mongo-uri",
-        "mongodb://mongo:27017",
-        "--mongo-db",
-        "nosql_logs",
-        "--collection",
-        "logs",
-        "--batch-size",
-        "5000",
-        "--access",
-        "/input_logs/access_log_full",
-        "--datax",
-        "/input_logs/HDFS_DataXceiver.log",
-        "--namesys",
-        "/input_logs/HDFS_FS_Namesystem.log"
-      ]
+      - ./input-logfiles:/input-logfiles:ro
     restart: "no"
-
+    command: >
+      bash -c '
+        ts() { date "+%Y-%m-%d %H:%M:%S.%3N"; }
+        echo "$(ts) | Ingest step deployment: START." &&
+        python execute.py &&
+        echo "$(ts) | Ingest step deployment: END."
+      '
 
 volumes:
   mongo_data:
-  ingest_work:

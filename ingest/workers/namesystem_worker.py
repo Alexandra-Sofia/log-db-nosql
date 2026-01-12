@@ -3,9 +3,9 @@ from typing import Any, Dict, List
 
 from pymongo import MongoClient
 
-from ingest.timestamps import ts_hdfs_compact, day_str
-from ingest.mongo_writer import flush_batch
-from ingest.util import tiny_logger, LogType
+from timestamps import ts_hdfs_compact, day_str
+from writer import flush_batch
+from util import tiny_logger, LogType
 
 NAMESYS_UPDATE_REGEX = re.compile(
     r"""
@@ -14,11 +14,12 @@ NAMESYS_UPDATE_REGEX = re.compile(
     (?P<tid>\d+)\s+
     INFO\s+dfs\.FSNamesystem:\s+BLOCK\*\s+
     NameSystem\.\w+:\s+
-    blockMap updated:\s+
+    blockMap\s+updated:\s+
     (?P<ip>[0-9.]+):\d+.*?
     blk_(?P<block>-?\d+)
     (?:\s+size\s+(?P<size>\d+))?
-    $""",
+    \s*$
+    """,
     re.VERBOSE,
 )
 
@@ -33,7 +34,8 @@ NAMESYS_ASK_REPLICATE_REGEX = re.compile(
     blk_(?P<block>-?\d+)
     \s+to\s+datanode\(s\)\s+
     (?P<dest_list>(?:[0-9.]+:\d+\s*)+)
-    $""",
+    \s*$
+    """,
     re.VERBOSE,
 )
 
@@ -57,7 +59,7 @@ def parse_namesystem_worker(
     with open(input_path, encoding="utf-8", errors="replace") as infile:
         for raw_line in infile:
             total += 1
-            line = raw_line.rstrip("\n")
+            line = raw_line.strip()
 
             m_upd = NAMESYS_UPDATE_REGEX.match(line)
             if m_upd:
