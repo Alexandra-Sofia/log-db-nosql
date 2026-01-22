@@ -1,6 +1,6 @@
 # Readme draft: mongo db log blabla
 
-## schema? or whatever its called in db design choices blabla
+## schema? or whatever its called in MONGO db design choices blabla
 {
   "_id": ObjectId,
 
