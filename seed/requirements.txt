@@ -1,2 +1,2 @@
 pymongo==4.10.1
-faker
+Faker==40.1.2

@@ -16,12 +16,13 @@ x-seed-env: &seed_env
   ADMIN_CAP: "1000"
   MODE: "fail"
   STEP_NAME: "Seed step deployment"
-  STEP_RUN: "python admins.py && python upvotes.py"
+  STEP_RUN: "python admins.py; python upvotes.py"
 
 x-step-script: &step_script |
+  set -e
   ts() { date "+%Y-%m-%d %H:%M:%S.%3N"; }
   echo "$$(ts) | $${STEP_NAME}: START."
-  $${STEP_RUN}
+  eval "$${STEP_RUN}"
   echo "$$(ts) | $${STEP_NAME}: END."
 
 x-step-cmd: &step_cmd
