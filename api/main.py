@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, Any
 
 from fastapi import FastAPI, HTTPException, Query
 from bson import ObjectId
@@ -16,10 +16,16 @@ admins = db["admins"]
 upvotes = db["upvotes"]
 user_actions = db["user_actions"]
 
-def day_str(dt: datetime) -> str:
+
+def ensure_utc(dt: datetime) -> datetime:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
-    return dt.date().isoformat()
+    return dt.astimezone(timezone.utc)
+
+
+def day_str(dt: datetime) -> str:
+    return ensure_utc(dt).date().isoformat()
+
 
 def oid(s: str) -> ObjectId:
     try:
@@ -27,35 +33,59 @@ def oid(s: str) -> ObjectId:
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid ObjectId")
 
+
+def to_jsonable(x: Any) -> Any:
+    if isinstance(x, ObjectId):
+        return str(x)
+    if isinstance(x, datetime):
+        # keep ISO for clients
+        return x.isoformat()
+    if isinstance(x, list):
+        return [to_jsonable(v) for v in x]
+    if isinstance(x, dict):
+        return {k: to_jsonable(v) for k, v in x.items()}
+    return x
+
+
 @app.get("/health")
 def health():
     return {"ok": True}
 
-@app.post("/logs")
+
+@app.post("/insert-logs")
 def insert_log(payload: LogCreate):
     doc = payload.model_dump()
-    doc["day"] = day_str(payload.ts)
+
+    # Normalize and derive fields
+    ts = ensure_utc(payload.ts)
+    doc["ts"] = ts
+    doc["day"] = day_str(ts)
     doc["upvoteCount"] = 0
 
-    if payload.logSet == "ACCESS":
-        if not payload.access:
+    # ACCESS: ensure access is a dict and derive actionType
+    if doc.get("logSet") == "ACCESS":
+        if payload.access is None:
             raise HTTPException(status_code=400, detail="ACCESS log requires access fields")
-        if not payload.sourceIp:
+        if payload.sourceIp is None:
             raise HTTPException(status_code=400, detail="ACCESS log requires sourceIp")
-        doc["access"]["method"] = payload.access.method
+
+        # ensure access subdoc exists and is consistent
+        doc["access"] = payload.access.model_dump()
         doc["actionType"] = payload.access.method
 
     res = logs.insert_one(doc)
     return {"id": str(res.inserted_id)}
 
-@app.post("/admins")
+
+@app.post("/create-admin")
 def create_admin(payload: AdminCreate):
     doc = payload.model_dump()
     doc["totalUpvotes"] = 0
     res = admins.insert_one(doc)
     return {"id": str(res.inserted_id)}
 
-@app.post("/upvotes")
+
+@app.post("/cast-upvote")
 def cast_upvote(payload: UpvoteCreate):
     admin_id = oid(payload.adminId)
     log_id = oid(payload.logId)
@@ -68,6 +98,11 @@ def cast_upvote(payload: UpvoteCreate):
     if not log_doc:
         raise HTTPException(status_code=404, detail="Log not found")
 
+    # Your ingestion uses single blockId per log doc. Store as array for Q11 convenience.
+    block_ids = []
+    if isinstance(log_doc.get("blockId"), int):
+        block_ids.append(log_doc["blockId"])
+
     vote_doc = {
         "adminId": admin_id,
         "logId": log_id,
@@ -76,23 +111,25 @@ def cast_upvote(payload: UpvoteCreate):
         "emailUsed": admin.get("email"),
         "usernameUsed": admin.get("username"),
         "sourceIp": log_doc.get("sourceIp"),
-        "blockIds": [],
+        "blockIds": block_ids,
     }
-
-    if log_doc.get("blockId") is not None:
-        vote_doc["blockIds"].append(log_doc["blockId"])
-    if log_doc.get("hdfs") and isinstance(log_doc["hdfs"].get("blockIds"), list):
-        vote_doc["blockIds"].extend([b for b in log_doc["hdfs"]["blockIds"] if isinstance(b, int)])
 
     try:
         upvotes.insert_one(vote_doc)
     except DuplicateKeyError:
         raise HTTPException(status_code=409, detail="Duplicate vote for same admin and log")
 
+    # Denormalized counters
     logs.update_one({"_id": log_id}, {"$inc": {"upvoteCount": 1}})
     admins.update_one({"_id": admin_id}, {"$inc": {"totalUpvotes": 1}})
 
     return {"ok": True}
+
+
+@app.get("/debug/count")
+def debug_count():
+    return {"logs": logs.count_documents({})}
+
 
 # Q1
 @app.get("/analytics/logs-per-type")
@@ -101,6 +138,9 @@ def q1_logs_per_type(
     end: datetime,
     logSet: Optional[str] = None,
 ):
+    start = ensure_utc(start)
+    end = ensure_utc(end)
+
     match = {"ts": {"$gte": start, "$lte": end}}
     if logSet:
         match["logSet"] = logSet
@@ -110,7 +150,8 @@ def q1_logs_per_type(
         {"$group": {"_id": "$actionType", "total": {"$sum": 1}}},
         {"$sort": {"total": -1}},
     ]
-    return {"results": list(logs.aggregate(pipeline))}
+    return {"results": to_jsonable(list(logs.aggregate(pipeline)))}
+
 
 # Q2
 @app.get("/analytics/requests-per-day")
@@ -119,48 +160,71 @@ def q2_requests_per_day(
     start: datetime,
     end: datetime,
 ):
+    start = ensure_utc(start)
+    end = ensure_utc(end)
+
     pipeline = [
         {"$match": {"logSet": logSet, "ts": {"$gte": start, "$lte": end}}},
         {"$group": {"_id": "$day", "total": {"$sum": 1}}},
         {"$sort": {"_id": 1}},
     ]
-    return {"results": list(logs.aggregate(pipeline))}
+    return {"results": to_jsonable(list(logs.aggregate(pipeline)))}
 
-# Q3 (ACCESS version: top 3 resources per sourceIp for a day)
+
+# Q3
 @app.get("/analytics/top3-per-sourceip")
-def q3_top3_per_sourceip(
-    day: str = Query(..., description="YYYY-MM-DD"),
-    logSet: str = Query("ACCESS"),
-):
-    if logSet != "ACCESS":
-        pipeline = [
-            {"$match": {"day": day, "logSet": logSet}},
-            {"$group": {"_id": {"sourceIp": "$sourceIp", "actionType": "$actionType"}, "cnt": {"$sum": 1}}},
-            {"$sort": {"_id.sourceIp": 1, "cnt": -1}},
-            {"$group": {"_id": "$_id.sourceIp", "top": {"$push": {"actionType": "$_id.actionType", "cnt": "$cnt"}}}},
-            {"$project": {"top": {"$slice": ["$top", 3]}}},
-        ]
-        return {"results": list(logs.aggregate(pipeline))}
-
+def q3_top3_per_sourceip(day: str = Query(..., description="YYYY-MM-DD")):
     pipeline = [
-        {"$match": {"day": day, "logSet": "ACCESS"}},
-        {"$group": {"_id": {"sourceIp": "$sourceIp", "resource": "$access.resource"}, "cnt": {"$sum": 1}}},
-        {"$sort": {"_id.sourceIp": 1, "cnt": -1}},
-        {"$group": {"_id": "$_id.sourceIp", "top": {"$push": {"resource": "$_id.resource", "cnt": "$cnt"}}}},
-        {"$project": {"top": {"$slice": ["$top", 3]}}},
+        # Only that day, and only docs that have a sourceIp
+        {"$match": {"day": day, "sourceIp": {"$ne": None}}},
+
+        # Build a signature that works across log formats
+        # ACCESS -> "GET /path"
+        # Others -> "<actionType>"
+        {"$addFields": {
+            "sig": {
+                "$cond": [
+                    {"$eq": ["$logSet", "ACCESS"]},
+                    {
+                        "$concat": [
+                            {"$ifNull": ["$access.method", ""]},
+                            " ",
+                            {"$ifNull": ["$access.resource", ""]},
+                        ]
+                    },
+                    {"$ifNull": ["$actionType", "UNKNOWN"]}
+                ]
+            }
+        }},
+
+        # Count each signature per sourceIp
+        {"$group": {"_id": {"sourceIp": "$sourceIp", "sig": "$sig"}, "cnt": {"$sum": 1}}},
+
+        # Sort so the most common come first per sourceIp (stable tie-breaker by sig)
+        {"$sort": {"_id.sourceIp": 1, "cnt": -1, "_id.sig": 1}},
+
+        # Pack per sourceIp and slice top 3
+        {"$group": {"_id": "$_id.sourceIp", "top": {"$push": {"sig": "$_id.sig", "cnt": "$cnt"}}}},
+        {"$project": {"_id": 0, "sourceIp": "$_id", "top": {"$slice": ["$top", 3]}}},
     ]
-    return {"results": list(logs.aggregate(pipeline))}
+    return {"results": to_jsonable(list(logs.aggregate(pipeline)))}
+
+
 
 # Q4
 @app.get("/analytics/least-http-methods")
 def q4_least_http_methods(start: datetime, end: datetime):
+    start = ensure_utc(start)
+    end = ensure_utc(end)
+
     pipeline = [
         {"$match": {"logSet": "ACCESS", "ts": {"$gte": start, "$lte": end}}},
         {"$group": {"_id": "$access.method", "cnt": {"$sum": 1}}},
         {"$sort": {"cnt": 1}},
         {"$limit": 2},
     ]
-    return {"results": list(logs.aggregate(pipeline))}
+    return {"results": to_jsonable(list(logs.aggregate(pipeline)))}
+
 
 # Q5
 @app.get("/analytics/referrers-multi-resource")
@@ -172,43 +236,43 @@ def q5_referrers_multi_resource():
         {"$match": {"resourceCount": {"$gt": 1}}},
         {"$sort": {"resourceCount": -1}},
     ]
-    return {"results": list(logs.aggregate(pipeline))}
+    return {"results": to_jsonable(list(logs.aggregate(pipeline)))}
+
 
 # Q6
 @app.get("/analytics/blocks-replicated-and-served")
 def q6_blocks_replicated_and_served(day: str = Query(..., description="YYYY-MM-DD")):
     pipeline = [
-        {
-            "$match": {
-                "day": day,
-                "logSet": {"$in": ["HDFS_NAMESYSTEM", "HDFS_DATAXCEIVER"]},
-                "actionType": {"$in": ["replicate", "served"]},
-                "blockId": {"$ne": None},
-            }
-        },
-        {
-            "$group": {
-                "_id": {"day": "$day", "blockId": "$blockId"},
-                "hasReplicate": {"$max": {"$cond": [{"$eq": ["$actionType", "replicate"]}, 1, 0]}},
-                "hasServed": {"$max": {"$cond": [{"$eq": ["$actionType", "served"]}, 1, 0]}},
-            }
-        },
+        {"$match": {
+            "day": day,
+            "logSet": {"$in": ["HDFS_NAMESYSTEM", "HDFS_DATAXCEIVER"]},
+            "actionType": {"$in": ["replicate", "served"]},
+            "blockId": {"$ne": None},
+        }},
+        {"$group": {
+            "_id": {"day": "$day", "blockId": "$blockId"},
+            "hasReplicate": {"$max": {"$cond": [{"$eq": ["$actionType", "replicate"]}, 1, 0]}},
+            "hasServed": {"$max": {"$cond": [{"$eq": ["$actionType", "served"]}, 1, 0]}},
+        }},
         {"$match": {"hasReplicate": 1, "hasServed": 1}},
         {"$project": {"_id": 0, "day": "$_id.day", "blockId": "$_id.blockId"}},
     ]
-    return {"results": list(logs.aggregate(pipeline))}
+    return {"results": to_jsonable(list(logs.aggregate(pipeline)))}
+
 
 # Q7
 @app.get("/analytics/top-upvoted-logs")
 def q7_top_upvoted_logs(day: str = Query(..., description="YYYY-MM-DD")):
     cursor = logs.find({"day": day}).sort("upvoteCount", -1).limit(50)
-    return {"results": [serialize_log(x) for x in cursor]}
+    return {"results": to_jsonable(list(cursor))}
+
 
 # Q8
 @app.get("/analytics/top-admins-upvotes")
 def q8_top_admins_upvotes():
     cursor = admins.find({}, {"username": 1, "email": 1, "phone": 1, "totalUpvotes": 1}).sort("totalUpvotes", -1).limit(50)
-    return {"results": [serialize_admin(x) for x in cursor]}
+    return {"results": to_jsonable(list(cursor))}
+
 
 # Q9
 @app.get("/analytics/top-admins-sourceips")
@@ -223,7 +287,8 @@ def q9_top_admins_sourceips():
         {"$unwind": "$admin"},
         {"$project": {"adminId": {"$toString": "$_id"}, "username": "$admin.username", "email": "$admin.email", "ipCount": 1}},
     ]
-    return {"results": list(upvotes.aggregate(pipeline))}
+    return {"results": to_jsonable(list(upvotes.aggregate(pipeline)))}
+
 
 # Q10
 @app.get("/analytics/logs-multi-username-per-email")
@@ -238,30 +303,17 @@ def q10_logs_multi_username_per_email():
         {"$unwind": "$log"},
         {"$project": {"logId": {"$toString": "$_id"}, "emails": 1, "log": "$log"}},
     ]
-    results = list(upvotes.aggregate(pipeline))
-    for r in results:
-        r["log"] = serialize_log(r["log"])
-    return {"results": results}
+    return {"results": to_jsonable(list(upvotes.aggregate(pipeline)))}
+
 
 # Q11
 @app.get("/analytics/blockids-voted")
-def q11_blockids_voted(adminId: str):
-    admin_id = oid(adminId)
+def q11_blockids_voted(username: str):
     pipeline = [
-        {"$match": {"adminId": admin_id}},
+        {"$match": {"usernameUsed": username}},
         {"$unwind": "$blockIds"},
         {"$group": {"_id": "$blockIds"}},
         {"$sort": {"_id": 1}},
         {"$project": {"_id": 0, "blockId": "$_id"}},
     ]
-    return {"results": list(upvotes.aggregate(pipeline))}
-
-def serialize_log(doc: dict) -> dict:
-    out = dict(doc)
-    out["id"] = str(out.pop("_id"))
-    return out
-
-def serialize_admin(doc: dict) -> dict:
-    out = dict(doc)
-    out["id"] = str(out.pop("_id"))
-    return out
+    return {"results": to_jsonable(list(upvotes.aggregate(pipeline)))}

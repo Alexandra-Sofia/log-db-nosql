@@ -9,17 +9,6 @@ services:
     volumes:
       - mongo_data:/data/db
 
-  api:
-    build: ./api
-    container_name: logdb_api
-    environment:
-      MONGO_URI: "mongodb://mongo:27017"
-      MONGO_DB: "nosql_logs"
-    ports:
-      - "8000:8000"
-    depends_on:
-      - mongo
-
   ingest:
     build:
       context: ./ingest
@@ -38,10 +27,46 @@ services:
     command: >
       bash -c '
         ts() { date "+%Y-%m-%d %H:%M:%S.%3N"; }
-        echo "$(ts) | Ingest step deployment: START." &&
-        python execute.py &&
+        echo "$(ts) | Ingest step deployment: START."
+        python execute.py
         echo "$(ts) | Ingest step deployment: END."
       '
+
+  seed:
+    build:
+      context: ./seed
+      dockerfile: Dockerfile
+    container_name: logdb_seed
+    environment:
+      MONGO_URI: "mongodb://mongo:27017"
+      MONGO_DB: "nosql_logs"
+      N_ADMINS: "500"
+      EXTRA_VOTE_FRAC: "0.20"
+      ADMIN_CAP: "1000"
+      MODE: "fail"
+    depends_on:
+      - ingest
+    restart: "no"
+    command: >
+      bash -c '
+        ts() { date "+%Y-%m-%d %H:%M:%S.%3N"; }
+        echo "$(ts) | Seed step deployment: START."
+        python admins.py
+        python upvotes.py
+        echo "$(ts) | Seed step deployment: END."
+      '
+
+  api:
+    build: ./api
+    container_name: logdb_api
+    ports:
+      - "8000:8000"
+    environment:
+      MONGO_URI: "mongodb://mongo:27017"
+      MONGO_DB: "nosql_logs"
+    depends_on:
+      - mongo
+    restart: "no"
 
 volumes:
   mongo_data:
