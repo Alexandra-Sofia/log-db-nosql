@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 from pymongo import MongoClient, UpdateOne
 from pymongo.errors import BulkWriteError, DuplicateKeyError
 
+from util import tiny_logger
+
 URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
 DB_NAME = os.getenv("MONGO_DB", "nosql_logs")
 
@@ -33,22 +35,32 @@ def ensure_indexes():
 
 
 def recompute_counters():
+    tiny_logger("[SEED][UPVOTES] Recomputing counters from upvotes collection...")
+
     # logs.upvoteCount
     bulk_log_updates = []
     for row in upvotes.aggregate([{"$group": {"_id": "$logId", "cnt": {"$sum": 1}}}]):
         bulk_log_updates.append(UpdateOne({"_id": row["_id"]}, {"$set": {"upvoteCount": row["cnt"]}}))
     if bulk_log_updates:
-        logs.bulk_write(bulk_log_updates, ordered=False)
+        res = logs.bulk_write(bulk_log_updates, ordered=False)
+        tiny_logger(f"[SEED][UPVOTES] Updated logs.upvoteCount for {res.modified_count} logs.")
+    else:
+        tiny_logger("[SEED][UPVOTES] No log counters to update (no upvotes yet).")
 
     # admins.totalUpvotes
     bulk_admin_updates = []
     for row in upvotes.aggregate([{"$group": {"_id": "$adminId", "cnt": {"$sum": 1}}}]):
         bulk_admin_updates.append(UpdateOne({"_id": row["_id"]}, {"$set": {"totalUpvotes": row["cnt"]}}))
     if bulk_admin_updates:
-        admins.bulk_write(bulk_admin_updates, ordered=False)
+        res = admins.bulk_write(bulk_admin_updates, ordered=False)
+        tiny_logger(f"[SEED][UPVOTES] Updated admins.totalUpvotes for {res.modified_count} admins.")
+    else:
+        tiny_logger("[SEED][UPVOTES] No admin counters to update (no upvotes yet).")
 
 
 def main():
+    tiny_logger("[SEED][UPVOTES] START")
+
     random.seed(SEED)
     ensure_indexes()
 
@@ -76,11 +88,12 @@ def main():
     # Determine total desired votes (optional richness)
     target_total_votes = target_covered + math.ceil(EXTRA_VOTE_FRAC * L)
 
-    print(f"Logs: {L}")
-    print(f"Admins: {A}")
-    print(f"Existing upvotes: {U}")
-    print(f"Covered logs now: {covered_now} (need at least {target_covered})")
-    print(f"Need additional covered logs: {needed}")
+    tiny_logger(f"[SEED][UPVOTES] Logs: {L}")
+    tiny_logger(f"[SEED][UPVOTES] Admins: {A}")
+    tiny_logger(f"[SEED][UPVOTES] Existing upvotes: {U}")
+    tiny_logger(f"[SEED][UPVOTES] Covered logs now: {covered_now} (need at least {target_covered})")
+    tiny_logger(f"[SEED][UPVOTES] Need additional covered logs: {needed}")
+    tiny_logger(f"[SEED][UPVOTES] Target total votes: {target_total_votes} (EXTRA_VOTE_FRAC={EXTRA_VOTE_FRAC})")
 
     # Load admins and their current counts (enforce cap)
     admin_docs = list(admins.find({}, {"_id": 1, "email": 1, "username": 1, "totalUpvotes": 1}))
@@ -117,9 +130,13 @@ def main():
 
     # 1) Guarantee coverage by selecting logs with upvoteCount == 0
     if needed > 0:
-        # stream docs instead of loading all logs
-        cursor = logs.find({"upvoteCount": 0}, {"_id": 1, "day": 1, "sourceIp": 1, "blockId": 1}).limit(needed)
+        tiny_logger(f"[SEED][UPVOTES] Ensuring coverage: inserting at least {needed} new votes on 0-vote logs...")
+        cursor = logs.find(
+            {"upvoteCount": 0},
+            {"_id": 1, "day": 1, "sourceIp": 1, "blockId": 1},
+        ).limit(needed)
 
+        coverage_done = 0
         for log_doc in cursor:
             aid = pick_admin()
             if aid is None:
@@ -128,37 +145,48 @@ def main():
             try:
                 upvotes.insert_one(make_vote(aid, log_doc))
                 inserted_votes += 1
+                coverage_done += 1
                 admin_vote_count[aid] += 1
                 logs.update_one({"_id": log_doc["_id"]}, {"$inc": {"upvoteCount": 1}})
                 admins.update_one({"_id": aid}, {"$inc": {"totalUpvotes": 1}})
             except DuplicateKeyError:
-                # extremely unlikely here, but if it happens, try another admin
-                # retry once
+                # extremely unlikely here, but if it happens, retry once with another admin
                 aid2 = pick_admin()
                 if aid2 is None:
                     raise SystemExit("Cannot allocate more votes without exceeding admin cap.")
                 upvotes.insert_one(make_vote(aid2, log_doc))
                 inserted_votes += 1
+                coverage_done += 1
                 admin_vote_count[aid2] += 1
                 logs.update_one({"_id": log_doc["_id"]}, {"$inc": {"upvoteCount": 1}})
                 admins.update_one({"_id": aid2}, {"$inc": {"totalUpvotes": 1}})
 
+            if coverage_done % 1000 == 0:
+                tiny_logger(f"[SEED][UPVOTES] Coverage progress: {coverage_done}/{needed}")
+
+        tiny_logger(f"[SEED][UPVOTES] Coverage step complete: inserted {coverage_done} votes.")
+    else:
+        tiny_logger("[SEED][UPVOTES] Coverage already satisfied; no mandatory votes needed.")
+
     # 2) Add extra votes for richer distributions (optional)
-    # Do not load all logs; sample by random skip is expensive.
-    # Instead: pull a moderate sample set of ids once.
     current_votes = upvotes.count_documents({})
     remaining = max(0, target_total_votes - current_votes)
 
     if remaining > 0:
-        # sample pool: take N ids from DB (bounded)
+        tiny_logger(f"[SEED][UPVOTES] Adding extra votes for richness: remaining={remaining}")
+
         pool_size = min(L, max(20000, remaining * 3))
+        tiny_logger(f"[SEED][UPVOTES] Building sampling pool of logs (pool_size={pool_size})...")
         sample_logs = list(logs.find({}, {"_id": 1, "day": 1, "sourceIp": 1, "blockId": 1}).limit(pool_size))
 
         batch = []
+        batched = 0
         for _ in range(remaining):
             aid = pick_admin()
             if aid is None:
+                tiny_logger("[SEED][UPVOTES] Reached admin cap across pool; stopping extra vote generation.")
                 break
+
             log_doc = random.choice(sample_logs)
             batch.append(make_vote(aid, log_doc))
             admin_vote_count[aid] += 1
@@ -167,9 +195,13 @@ def main():
                 try:
                     res = upvotes.insert_many(batch, ordered=False)
                     inserted_votes += len(res.inserted_ids)
+                    batched += len(res.inserted_ids)
                 except BulkWriteError as e:
                     inserted_votes += e.details.get("nInserted", 0)
+                    batched += e.details.get("nInserted", 0)
                 batch = []
+                if batched % 20000 == 0:
+                    tiny_logger(f"[SEED][UPVOTES] Extra votes inserted so far: {batched}")
 
         if batch:
             try:
@@ -178,6 +210,10 @@ def main():
             except BulkWriteError as e:
                 inserted_votes += e.details.get("nInserted", 0)
 
+        tiny_logger(f"[SEED][UPVOTES] Extra vote step complete.")
+    else:
+        tiny_logger("[SEED][UPVOTES] No extra votes needed (already at/above target_total_votes).")
+
     # Final recompute for correctness and validation
     recompute_counters()
 
@@ -185,14 +221,16 @@ def main():
     max_admin = admins.find({}, {"totalUpvotes": 1}).sort("totalUpvotes", -1).limit(1)
     max_admin_val = next(max_admin, {}).get("totalUpvotes", 0)
 
-    print(f"Inserted votes this run: {inserted_votes}")
-    print(f"Logs with >=1 upvote: {covered} (required >= {target_covered})")
-    print(f"Max admin totalUpvotes: {max_admin_val} (cap {ADMIN_CAP})")
+    tiny_logger(f"[SEED][UPVOTES] Inserted votes this run: {inserted_votes}")
+    tiny_logger(f"[SEED][UPVOTES] Logs with >=1 upvote: {covered} (required >= {target_covered})")
+    tiny_logger(f"[SEED][UPVOTES] Max admin totalUpvotes: {max_admin_val} (cap {ADMIN_CAP})")
 
     if covered < target_covered:
         raise SystemExit("Constraint failed: fewer than 1/3 logs have upvotes.")
     if max_admin_val > ADMIN_CAP:
         raise SystemExit("Constraint failed: an admin exceeded 1000 upvotes.")
+
+    tiny_logger("[SEED][UPVOTES] END")
 
 
 if __name__ == "__main__":
