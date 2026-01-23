@@ -16,7 +16,7 @@ x-seed-env: &seed_env
   ADMIN_CAP: "1000"
   MODE: "fail"
   STEP_NAME: "Seed step deployment"
-  STEP_RUN: "python admins.py; python upvotes.py"
+  STEP_RUN: "python execute.py"
 
 x-step-script: &step_script |
   set -e
