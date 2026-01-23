@@ -1,3 +1,31 @@
+x-mongo-env: &mongo_env
+  MONGO_URI: "mongodb://mongo:27017"
+  MONGO_DB: "nosql_logs"
+
+x-ingest-env: &ingest_env
+  <<: *mongo_env
+  MONGO_COLLECTION: "logs"
+  LOG_DIR: "/input-logfiles"
+  STEP_NAME: "Ingest step deployment"
+  STEP_RUN: "python execute.py"
+
+x-seed-env: &seed_env
+  <<: *mongo_env
+  N_ADMINS: "500"
+  EXTRA_VOTE_FRAC: "0.20"
+  ADMIN_CAP: "1000"
+  MODE: "fail"
+  STEP_NAME: "Seed step deployment"
+  STEP_RUN: "python admins.py && python upvotes.py"
+
+x-step-cmd: &step_cmd
+  bash -c '
+    ts() { date "+%Y-%m-%d %H:%M:%S.%3N"; }
+    echo "$(ts) | ${STEP_NAME}: START."
+    ${STEP_RUN}
+    echo "$(ts) | ${STEP_NAME}: END."
+  '
+
 services:
   mongo:
     image: mongo:7
@@ -14,56 +42,31 @@ services:
       context: ./ingest
       dockerfile: Dockerfile
     container_name: logdb_ingest
-    environment:
-      MONGO_URI: "mongodb://mongo:27017"
-      MONGO_DB: "nosql_logs"
-      MONGO_COLLECTION: "logs"
-      LOG_DIR: "/input-logfiles"
+    environment: *ingest_env
     depends_on:
       - mongo
     volumes:
       - ./input-logfiles:/input-logfiles:ro
     restart: "no"
-    command: >
-      bash -c '
-        ts() { date "+%Y-%m-%d %H:%M:%S.%3N"; }
-        echo "$(ts) | Ingest step deployment: START."
-        python execute.py
-        echo "$(ts) | Ingest step deployment: END."
-      '
+    command: *step_cmd
 
   seed:
     build:
       context: ./seed
       dockerfile: Dockerfile
     container_name: logdb_seed
-    environment:
-      MONGO_URI: "mongodb://mongo:27017"
-      MONGO_DB: "nosql_logs"
-      N_ADMINS: "500"
-      EXTRA_VOTE_FRAC: "0.20"
-      ADMIN_CAP: "1000"
-      MODE: "fail"
+    environment: *seed_env
     depends_on:
       - ingest
     restart: "no"
-    command: >
-      bash -c '
-        ts() { date "+%Y-%m-%d %H:%M:%S.%3N"; }
-        echo "$(ts) | Seed step deployment: START."
-        python admins.py
-        python upvotes.py
-        echo "$(ts) | Seed step deployment: END."
-      '
+    command: *step_cmd
 
   api:
     build: ./api
     container_name: logdb_api
     ports:
       - "8000:8000"
-    environment:
-      MONGO_URI: "mongodb://mongo:27017"
-      MONGO_DB: "nosql_logs"
+    environment: *mongo_env
     depends_on:
       - mongo
     restart: "no"
