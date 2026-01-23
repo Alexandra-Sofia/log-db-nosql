@@ -18,13 +18,16 @@ x-seed-env: &seed_env
   STEP_NAME: "Seed step deployment"
   STEP_RUN: "python admins.py && python upvotes.py"
 
+x-step-script: &step_script |
+  ts() { date "+%Y-%m-%d %H:%M:%S.%3N"; }
+  echo "$$(ts) | $${STEP_NAME}: START."
+  $${STEP_RUN}
+  echo "$$(ts) | $${STEP_NAME}: END."
+
 x-step-cmd: &step_cmd
-  bash -c '
-    ts() { date "+%Y-%m-%d %H:%M:%S.%3N"; }
-    echo "$(ts) | ${STEP_NAME}: START."
-    ${STEP_RUN}
-    echo "$(ts) | ${STEP_NAME}: END."
-  '
+  - bash
+  - -lc
+  - *step_script
 
 services:
   mongo:
