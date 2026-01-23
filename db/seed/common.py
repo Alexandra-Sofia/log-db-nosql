@@ -1,4 +1,4 @@
-# seed_common.py
+# common.py
 import os
 import random
 from dataclasses import dataclass
@@ -11,10 +11,14 @@ from pymongo.database import Database
 from tiny_logger import tiny_logger
 
 """
-Shared utilities for seeding MongoDB collections.
+Shared utilities for the seeding scripts.
 
-This module centralizes configuration loading, MongoDB connectivity, and common
-validation helpers used by multiple seed steps.
+This module centralizes:
+    * environment-based configuration loading
+    * MongoDB connectivity
+    * core index creation
+    * shared validation helpers
+    * capped random selection for admin allocation
 """
 
 
@@ -35,7 +39,7 @@ class MongoConfig:
 @dataclass(frozen=True)
 class SeedConfig:
     """
-    Global seeding configuration shared across seed steps.
+    Shared configuration used by multiple seed steps.
 
     :param mongo: MongoDB configuration.
     :param seed: Random seed for reproducibility.
@@ -51,7 +55,7 @@ class SeedConfig:
 @dataclass(frozen=True)
 class Collections:
     """
-    MongoDB collection handles used by the project.
+    MongoDB collections used by the project.
 
     :param logs: Logs collection.
     :param admins: Admins collection.
@@ -98,6 +102,16 @@ def load_seed_config() -> SeedConfig:
     )
 
 
+def seed_random(cfg: SeedConfig) -> None:
+    """
+    Seed the global random generator.
+
+    :param cfg: Shared seed configuration.
+    :return: None
+    """
+    random.seed(cfg.seed)
+
+
 def connect(cfg: SeedConfig) -> SeedContext:
     """
     Connect to MongoDB and build a shared seed context.
@@ -115,14 +129,17 @@ def connect(cfg: SeedConfig) -> SeedContext:
     return SeedContext(cfg=cfg, db=db, col=col)
 
 
-def seed_random(cfg: SeedConfig) -> None:
+def counts(ctx: SeedContext) -> Tuple[int, int, int]:
     """
-    Seed the global random generator using the configured seed.
+    Return document counts for logs, admins, upvotes.
 
-    :param cfg: Shared seed configuration.
-    :return: None
+    :param ctx: Shared seed context.
+    :return: Tuple[int, int, int]
     """
-    random.seed(cfg.seed)
+    L = ctx.col.logs.count_documents({})
+    A = ctx.col.admins.count_documents({})
+    U = ctx.col.upvotes.count_documents({})
+    return L, A, U
 
 
 def require_non_empty(name: str, count: int, message: str) -> None:
@@ -152,6 +169,24 @@ def fail_if_exists(mode: str, existing: int, message: str) -> None:
         raise SystemExit(message)
 
 
+def ensure_core_indexes(ctx: SeedContext) -> None:
+    """
+    Ensure indexes required for correctness and performance.
+
+    :param ctx: Shared seed context.
+    :return: None
+    """
+    tiny_logger("[SEED][INDEXES] Ensuring core indexes...")
+
+    ctx.col.admins.create_index([("username", 1)], unique=True, name="uniq_username")
+    ctx.col.admins.create_index([("email", 1)], unique=True, name="uniq_email")
+    ctx.col.upvotes.create_index([("adminId", 1), ("logId", 1)], unique=True, name="uniq_admin_log_vote")
+    ctx.col.logs.create_index([("day", 1), ("upvoteCount", -1)], name="day_upvotes_desc")
+    ctx.col.logs.create_index([("upvoteCount", 1)], name="upvoteCount")
+
+    tiny_logger("[SEED][INDEXES] Core indexes ensured.")
+
+
 def pick_capped_random_id(ids: list, counters: Dict[Any, int], cap: int) -> Optional[Any]:
     """
     Pick a random id whose counter is below cap.
@@ -168,30 +203,3 @@ def pick_capped_random_id(ids: list, counters: Dict[Any, int], cap: int) -> Opti
         if counters.get(chosen, 0) < cap:
             return chosen
     return None
-
-
-def ensure_core_indexes(ctx: SeedContext) -> None:
-    """
-    Ensure indexes required across the project seed steps.
-
-    :param ctx: Shared seed context.
-    :return: None
-    """
-    ctx.col.admins.create_index([("username", 1)], unique=True, name="uniq_username")
-    ctx.col.admins.create_index([("email", 1)], unique=True, name="uniq_email")
-    ctx.col.upvotes.create_index([("adminId", 1), ("logId", 1)], unique=True, name="uniq_admin_log_vote")
-    ctx.col.logs.create_index([("day", 1), ("upvoteCount", -1)], name="day_upvotes_desc")
-    ctx.col.logs.create_index([("upvoteCount", 1)], name="upvoteCount")
-
-
-def counts(ctx: SeedContext) -> Tuple[int, int, int]:
-    """
-    Return document counts for logs, admins, upvotes.
-
-    :param ctx: Shared seed context.
-    :return: Tuple[int, int, int]
-    """
-    L = ctx.col.logs.count_documents({})
-    A = ctx.col.admins.count_documents({})
-    U = ctx.col.upvotes.count_documents({})
-    return L, A, U

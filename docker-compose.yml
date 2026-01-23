@@ -1,39 +1,6 @@
-x-mongo-env: &mongo_env
-  MONGO_URI: "mongodb://mongo:27017"
-  MONGO_DB: "nosql_logs"
-
-x-ingest-env: &ingest_env
-  <<: *mongo_env
-  MONGO_COLLECTION: "logs"
-  LOG_DIR: "/input-logfiles"
-  STEP_NAME: "Ingest step deployment"
-  STEP_RUN: "python execute.py"
-
-x-seed-env: &seed_env
-  <<: *mongo_env
-  N_ADMINS: "500"
-  EXTRA_VOTE_FRAC: "0.20"
-  ADMIN_CAP: "1000"
-  MODE: "fail"
-  STEP_NAME: "Seed step deployment"
-  STEP_RUN: "python execute.py"
-
-x-step-script: &step_script |
-  set -e
-  ts() { date "+%Y-%m-%d %H:%M:%S.%3N"; }
-  echo "$$(ts) | $${STEP_NAME}: START."
-  eval "$${STEP_RUN}"
-  echo "$$(ts) | $${STEP_NAME}: END."
-
-x-step-cmd: &step_cmd
-  - bash
-  - -lc
-  - *step_script
-
 services:
   mongo:
     image: mongo:7
-    container_name: mongo_db
     ports:
       - "27017:27017"
     environment:
@@ -41,39 +8,40 @@ services:
     volumes:
       - mongo_data:/data/db
 
-  ingest:
-    build:
-      context: ./ingest
-      dockerfile: Dockerfile
-    container_name: logdb_ingest
-    environment: *ingest_env
+  runner:
+    build: ./db
+    environment:
+      MONGO_URI: "mongodb://mongo:27017"
+      MONGO_DB: "nosql_logs"
+      MONGO_COLLECTION: "logs"
+      LOG_DIR: "/input-logfiles"
+      N_ADMINS: "500"
+      EXTRA_VOTE_FRAC: "0.20"
+      ADMIN_CAP: "1000"
+      MODE: "fail"
+      SEED: "42"
+      PYTHONPATH: "/app"
     depends_on:
       - mongo
     volumes:
       - ./input-logfiles:/input-logfiles:ro
-    restart: "no"
-    command: *step_cmd
+    command: >
+      bash -lc '
+        set -e
+        ts() { date "+%Y-%m-%d %H:%M:%S.%3N"; }
 
-  seed:
-    build:
-      context: ./seed
-      dockerfile: Dockerfile
-    container_name: logdb_seed
-    environment: *seed_env
-    depends_on:
-      - ingest
-    restart: "no"
-    command: *step_cmd
+        echo "$(ts) | Pipeline: START."
 
-  api:
-    build: ./api
-    container_name: logdb_api
-    ports:
-      - "8000:8000"
-    environment: *mongo_env
-    depends_on:
-      - mongo
-    restart: "no"
+        echo "$(ts) | Ingest step deployment: START."
+        python ingest/execute.py
+        echo "$(ts) | Ingest step deployment: END."
+
+        echo "$(ts) | Seed step deployment: START."
+        python seed/execute.py
+        echo "$(ts) | Seed step deployment: END."
+
+        echo "$(ts) | Pipeline: END."
+      '
 
 volumes:
   mongo_data:

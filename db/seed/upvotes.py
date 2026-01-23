@@ -1,3 +1,4 @@
+# upvotes.py
 import math
 import os
 import random
@@ -14,8 +15,10 @@ from tiny_logger import tiny_logger
 """
 Upvote seeding step.
 
-This module contains upvote-specific configuration and logic.
-Mongo connectivity, indexes, and shared validations are handled centrally.
+This module generates the upvote dataset and enforces:
+    * at least one third of all logs have at least one upvote
+    * no administrator has more than ADMIN_CAP upvotes
+    * duplicate votes by the same admin on the same log are rejected
 """
 
 
@@ -59,13 +62,19 @@ def recompute_counters(ctx: SeedContext) -> None:
     for row in ctx.col.upvotes.aggregate([{"$group": {"_id": "$logId", "cnt": {"$sum": 1}}}]):
         log_updates.append(UpdateOne({"_id": row["_id"]}, {"$set": {"upvoteCount": row["cnt"]}}))
     if log_updates:
-        ctx.col.logs.bulk_write(log_updates, ordered=False)
+        res = ctx.col.logs.bulk_write(log_updates, ordered=False)
+        tiny_logger(f"[SEED][UPVOTES] Updated logs.upvoteCount for {res.modified_count} logs.")
+    else:
+        tiny_logger("[SEED][UPVOTES] No log counters to update (no upvotes yet).")
 
     admin_updates: List[UpdateOne] = []
     for row in ctx.col.upvotes.aggregate([{"$group": {"_id": "$adminId", "cnt": {"$sum": 1}}}]):
         admin_updates.append(UpdateOne({"_id": row["_id"]}, {"$set": {"totalUpvotes": row["cnt"]}}))
     if admin_updates:
-        ctx.col.admins.bulk_write(admin_updates, ordered=False)
+        res = ctx.col.admins.bulk_write(admin_updates, ordered=False)
+        tiny_logger(f"[SEED][UPVOTES] Updated admins.totalUpvotes for {res.modified_count} admins.")
+    else:
+        tiny_logger("[SEED][UPVOTES] No admin counters to update (no upvotes yet).")
 
 
 def load_admin_state(ctx: SeedContext) -> Tuple[List[Any], Dict[Any, Dict[str, Any]], Dict[Any, int]]:
@@ -94,10 +103,10 @@ def target_covered(log_count: int) -> int:
 
 def target_total_votes(log_count: int, extra_vote_frac: float) -> int:
     """
-    Compute the total desired votes.
+    Compute the desired total number of votes.
 
     :param log_count: Total logs.
-    :param extra_vote_frac: Fraction of extra votes relative to total logs.
+    :param extra_vote_frac: Extra vote fraction.
     :return: int
     """
     return target_covered(log_count) + int(math.ceil(extra_vote_frac * log_count))
@@ -108,8 +117,8 @@ def make_vote(now: datetime, aid: Any, admin: Dict[str, Any], log_doc: Dict[str,
     Build a vote document.
 
     :param now: UTC timestamp for the vote.
-    :param aid: Admin id.
-    :param admin: Admin document.
+    :param aid: Administrator id.
+    :param admin: Administrator document.
     :param log_doc: Log document.
     :return: Dict[str, Any]
     """
@@ -149,6 +158,7 @@ def ensure_coverage(
     admin_ids: List[Any],
     admin_by_id: Dict[Any, Dict[str, Any]],
     admin_counts: Dict[Any, int],
+    progress_every: int = 1000,
 ) -> int:
     """
     Ensure coverage by upvoting logs with upvoteCount == 0.
@@ -159,19 +169,28 @@ def ensure_coverage(
     :param admin_ids: Admin id list.
     :param admin_by_id: Map admin id to admin doc.
     :param admin_counts: Map admin id to current upvote count.
+    :param progress_every: Progress log frequency.
     :return: int
     """
     if need <= 0:
+        tiny_logger("[SEED][UPVOTES] Coverage already satisfied; no mandatory votes needed.")
         return 0
+
+    tiny_logger(f"[SEED][UPVOTES] Ensuring coverage: inserting at least {need} new votes on 0-vote logs...")
 
     now = datetime.now(timezone.utc)
     inserted = 0
-    cursor = ctx.col.logs.find({"upvoteCount": 0}, {"_id": 1, "day": 1, "sourceIp": 1, "blockId": 1}).limit(need)
+
+    cursor = ctx.col.logs.find(
+        {"upvoteCount": 0},
+        {"_id": 1, "day": 1, "sourceIp": 1, "blockId": 1},
+    ).limit(need)
 
     for log_doc in cursor:
         aid = pick_capped_random_id(admin_ids, admin_counts, cfg.admin_cap)
         if aid is None:
             raise SystemExit("Cannot allocate more votes without exceeding admin cap.")
+
         try:
             insert_vote_and_bump(ctx, make_vote(now, aid, admin_by_id[aid], log_doc))
             admin_counts[aid] += 1
@@ -184,6 +203,10 @@ def ensure_coverage(
             admin_counts[aid2] += 1
             inserted += 1
 
+        if progress_every > 0 and inserted % progress_every == 0:
+            tiny_logger(f"[SEED][UPVOTES] Coverage progress: {inserted}/{need}")
+
+    tiny_logger(f"[SEED][UPVOTES] Coverage step complete: inserted {inserted} votes.")
     return inserted
 
 
@@ -226,9 +249,13 @@ def add_extra_votes(
     :return: int
     """
     if remaining <= 0:
+        tiny_logger("[SEED][UPVOTES] No extra votes needed (already at/above target_total_votes).")
         return 0
 
+    tiny_logger(f"[SEED][UPVOTES] Adding extra votes for richness: remaining={remaining}")
+
     pool_size = min(log_count, max(20000, remaining * 3))
+    tiny_logger(f"[SEED][UPVOTES] Building sampling pool of logs (pool_size={pool_size})...")
     sample_logs = list(ctx.col.logs.find({}, {"_id": 1, "day": 1, "sourceIp": 1, "blockId": 1}).limit(pool_size))
 
     now = datetime.now(timezone.utc)
@@ -238,35 +265,41 @@ def add_extra_votes(
     for _ in range(remaining):
         aid = pick_capped_random_id(admin_ids, admin_counts, cfg.admin_cap)
         if aid is None:
+            tiny_logger("[SEED][UPVOTES] Reached admin cap across pool; stopping extra vote generation.")
             break
+
         log_doc = random.choice(sample_logs)
         batch.append(make_vote(now, aid, admin_by_id[aid], log_doc))
         admin_counts[aid] += 1
+
         if len(batch) >= 5000:
             inserted_total += insert_many(ctx.col.upvotes, batch)
             batch = []
 
     inserted_total += insert_many(ctx.col.upvotes, batch)
+    tiny_logger("[SEED][UPVOTES] Extra vote step complete.")
     return inserted_total
 
 
-def validate_constraints(ctx: SeedContext, cfg: UpvotesConfig, required_covered: int) -> None:
+def validate_constraints(ctx: SeedContext, cfg: UpvotesConfig, required_covered: int) -> Tuple[int, int]:
     """
     Validate coverage and cap constraints.
 
     :param ctx: Shared seed context.
     :param cfg: Upvotes configuration.
     :param required_covered: Minimum covered logs required.
-    :return: None
+    :return: Tuple[int, int]
     """
     covered = ctx.col.logs.count_documents({"upvoteCount": {"$gte": 1}})
     max_admin_cursor = ctx.col.admins.find({}, {"totalUpvotes": 1}).sort("totalUpvotes", -1).limit(1)
-    max_admin_val = next(max_admin_cursor, {}).get("totalUpvotes", 0)
+    max_admin_val = int(next(max_admin_cursor, {}).get("totalUpvotes", 0))
 
     if covered < required_covered:
         raise SystemExit("Constraint failed: fewer than 1/3 logs have upvotes.")
     if max_admin_val > cfg.admin_cap:
         raise SystemExit("Constraint failed: an admin exceeded 1000 upvotes.")
+
+    return covered, max_admin_val
 
 
 def seed_upvotes(ctx: SeedContext, cfg: UpvotesConfig) -> int:
@@ -277,16 +310,27 @@ def seed_upvotes(ctx: SeedContext, cfg: UpvotesConfig) -> int:
     :param cfg: Upvotes configuration.
     :return: int
     """
+    tiny_logger("[SEED][UPVOTES] START")
+
     recompute_counters(ctx)
 
     L = ctx.col.logs.count_documents({})
+    A = ctx.col.admins.count_documents({})
+    U = ctx.col.upvotes.count_documents({})
+
     required = target_covered(L)
     covered_now = ctx.col.logs.count_documents({"upvoteCount": {"$gte": 1}})
     need = max(0, required - covered_now)
 
     desired_total = target_total_votes(L, cfg.extra_vote_frac)
-    current_votes = ctx.col.upvotes.count_documents({})
-    remaining = max(0, desired_total - current_votes)
+    remaining = max(0, desired_total - U)
+
+    tiny_logger(f"[SEED][UPVOTES] Logs: {L}")
+    tiny_logger(f"[SEED][UPVOTES] Admins: {A}")
+    tiny_logger(f"[SEED][UPVOTES] Existing upvotes: {U}")
+    tiny_logger(f"[SEED][UPVOTES] Covered logs now: {covered_now} (need at least {required})")
+    tiny_logger(f"[SEED][UPVOTES] Need additional covered logs: {need}")
+    tiny_logger(f"[SEED][UPVOTES] Target total votes: {desired_total} (EXTRA_VOTE_FRAC={cfg.extra_vote_frac})")
 
     admin_ids, admin_by_id, admin_counts = load_admin_state(ctx)
 
@@ -294,6 +338,13 @@ def seed_upvotes(ctx: SeedContext, cfg: UpvotesConfig) -> int:
     inserted_extra = add_extra_votes(ctx, cfg, remaining, admin_ids, admin_by_id, admin_counts, L)
 
     recompute_counters(ctx)
-    validate_constraints(ctx, cfg, required)
 
-    return inserted_coverage + inserted_extra
+    covered, max_admin_val = validate_constraints(ctx, cfg, required)
+
+    inserted_total = inserted_coverage + inserted_extra
+    tiny_logger(f"[SEED][UPVOTES] Inserted votes this run: {inserted_total}")
+    tiny_logger(f"[SEED][UPVOTES] Logs with >=1 upvote: {covered} (required >= {required})")
+    tiny_logger(f"[SEED][UPVOTES] Max admin totalUpvotes: {max_admin_val} (cap {cfg.admin_cap})")
+    tiny_logger("[SEED][UPVOTES] END")
+
+    return inserted_total

@@ -1,3 +1,4 @@
+# admins.py
 import os
 from dataclasses import dataclass
 from typing import Dict, List
@@ -10,8 +11,9 @@ from tiny_logger import tiny_logger
 """
 Administrator seeding step.
 
-This module only contains admin-specific configuration and logic.
-Mongo connectivity, indexes, and shared validations are handled centrally.
+This module generates the administrator dataset using Faker and populates the
+``admins`` collection. The step is idempotent: if admins already exist, it
+logs and exits without modifying the collection.
 """
 
 
@@ -20,7 +22,7 @@ class AdminsConfig:
     """
     Configuration for administrator generation.
 
-    :param n_admins: Number of admins to generate.
+    :param n_admins: Number of administrators to generate.
     :return: AdminsConfig
     """
 
@@ -29,7 +31,7 @@ class AdminsConfig:
 
 def load_admins_config() -> AdminsConfig:
     """
-    Load admin seed configuration from environment variables.
+    Load administrator seeding configuration from environment variables.
 
     :param None: This function does not accept any parameters.
     :return: AdminsConfig
@@ -39,7 +41,7 @@ def load_admins_config() -> AdminsConfig:
 
 def admins_exist(ctx: SeedContext) -> int:
     """
-    Return existing admin document count.
+    Return the number of existing administrators.
 
     :param ctx: Shared seed context.
     :return: int
@@ -51,8 +53,8 @@ def build_admin_docs(fake: Faker, n_admins: int) -> List[Dict]:
     """
     Build administrator documents.
 
-    :param fake: Faker instance.
-    :param n_admins: Number of admins to generate.
+    :param fake: Faker instance used for data generation.
+    :param n_admins: Number of admin documents to generate.
     :return: List[Dict]
     """
     docs: List[Dict] = []
@@ -73,7 +75,7 @@ def seed_admins(ctx: SeedContext, cfg: AdminsConfig) -> int:
     Seed administrators if none exist.
 
     :param ctx: Shared seed context.
-    :param cfg: Admin seeding configuration.
+    :param cfg: Administrator seeding configuration.
     :return: int
     """
     existing = admins_exist(ctx)
@@ -82,9 +84,12 @@ def seed_admins(ctx: SeedContext, cfg: AdminsConfig) -> int:
         return 0
 
     tiny_logger(f"[SEED][ADMINS] Generating {cfg.n_admins} administrators...")
+
     fake = Faker()
     docs = build_admin_docs(fake, cfg.n_admins)
-    result = ctx.col.admins.insert_many(docs)
-    inserted = len(result.inserted_ids)
+
+    res = ctx.col.admins.insert_many(docs)
+    inserted = len(res.inserted_ids)
+
     tiny_logger(f"[SEED][ADMINS] Inserted {inserted} admins.")
     return inserted
