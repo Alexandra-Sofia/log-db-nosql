@@ -1,3 +1,4 @@
+import hashlib
 import re
 from typing import Any, Dict, List
 
@@ -28,6 +29,19 @@ ACCESS_REGEX = re.compile(
 )
 
 
+def _ingest_key(input_path: str, line_no: int, raw_line: str) -> str:
+    """
+    Build a deterministic per-line ingestion key.
+
+    :param input_path: Input file path.
+    :param line_no: 1-based line number.
+    :param raw_line: Raw line content (without trailing newline).
+    :return: str
+    """
+    material = f"{input_path}|{line_no}|{raw_line}"
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
 def parse_access_worker(
     input_path: str,
     mongo_uri: str,
@@ -36,77 +50,67 @@ def parse_access_worker(
     batch_size: int,
 ) -> None:
     """
-    Parse an Apache access log file and insert entries into MongoDB.
+    Parse an Apache access log file and insert documents into MongoDB.
 
-    The function reads the log file line by line, applies a regular
-    expression to extract fields, transforms them into a normalized
-    document schema, and inserts documents into MongoDB in batches.
-
-    Lines that do not match the expected access log format are ignored.
-
-    :param input_path: Path to the Apache access log file.
+    :param input_path: Path to the input log file.
     :param mongo_uri: MongoDB connection URI.
-    :param mongo_db: Target MongoDB database name.
-    :param mongo_coll: Target MongoDB collection name.
-    :param batch_size: Number of documents per bulk insert.
+    :param mongo_db: MongoDB database name.
+    :param mongo_coll: MongoDB collection name.
+    :param batch_size: Maximum batch size for bulk writes.
     :return: None
     """
     client = MongoClient(mongo_uri)
-    collection = client[mongo_db][mongo_coll]
+    coll = client[mongo_db][mongo_coll]
 
     tiny_logger(f"[ACCESS] start: {input_path}")
 
     batch: List[Dict[str, Any]] = []
-    total_lines = 0
-    matched_lines = 0
-    inserted_docs = 0
+    total = 0
+    matched = 0
+    inserted = 0
 
     with open(input_path, encoding="utf-8", errors="replace") as infile:
-        for raw_line in infile:
-            total_lines += 1
-            line = raw_line.rstrip("\n")
+        for line_no, raw in enumerate(infile, start=1):
+            total += 1
+            line = raw.rstrip("\n")
 
-            match = ACCESS_REGEX.match(line)
-            if match is None:
+            m = ACCESS_REGEX.match(line)
+            if not m:
                 continue
 
-            matched_lines += 1
-            groups = match.groupdict()
+            matched += 1
+            g = m.groupdict()
 
-            timestamp = ts_apache(groups["timestamp"])
-            size_bytes = None if groups["size"] in {"", "-"} else int(groups["size"])
-            referrer = None if groups["referrer"] == "-" else groups["referrer"]
+            ts = ts_apache(g["timestamp"])
+            size_bytes = None if g["size"] in {"", "-"} else int(g["size"])
+            ref = None if g["referrer"] == "-" else g["referrer"]
 
-            document = {
+            doc = {
                 "logSet": LogType.ACCESS,
-                "actionType": groups["method"],
-                "ts": timestamp,
-                "day": day_str(timestamp),
-                "sourceIp": groups["ip"],
+                "ingestKey": _ingest_key(input_path, line_no, line),
+                "actionType": g["method"],
+                "ts": ts,
+                "day": day_str(ts),
+                "sourceIp": g["ip"],
                 "destIp": None,
                 "blockId": None,
                 "sizeBytes": size_bytes,
                 "access": {
-                    "remoteName": groups["remote_name"],
-                    "authUser": groups["auth_user"],
-                    "method": groups["method"],
-                    "resource": groups["resource"],
-                    "status": int(groups["status"]),
-                    "referrer": referrer if referrer is not None else "-",
-                    "userAgent": groups["agent"],
+                    "remoteName": g["remote_name"],
+                    "authUser": g["auth_user"],
+                    "method": g["method"],
+                    "resource": g["resource"],
+                    "status": int(g["status"]),
+                    "referrer": ref if ref is not None else "-",
+                    "userAgent": g["agent"],
                 },
                 "upvoteCount": 0,
             }
 
-            batch.append(document)
-
+            batch.append(doc)
             if len(batch) >= batch_size:
-                inserted_docs += flush_batch(collection, batch)
-                batch.clear()
+                inserted += flush_batch(coll, batch)
+                batch = []
 
-    inserted_docs += flush_batch(collection, batch)
-
-    tiny_logger(
-        f"[ACCESS] done: matched {matched_lines}/{total_lines}, "
-        f"inserted {inserted_docs}"
-    )
+    inserted += flush_batch(coll, batch)
+    tiny_logger(f"[ACCESS] done: matched {matched}/{total}, inserted {inserted}")

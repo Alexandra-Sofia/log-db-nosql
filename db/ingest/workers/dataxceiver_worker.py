@@ -1,3 +1,4 @@
+import hashlib
 import re
 from typing import Any, Dict, List, Optional
 
@@ -46,100 +47,27 @@ DATAX_REGEX = re.compile(
 )
 
 
+def _ingest_key(input_path: str, line_no: int, raw_line: str) -> str:
+    """
+    Build a deterministic per-line ingestion key.
+
+    :param input_path: Input file path.
+    :param line_no: 1-based line number.
+    :param raw_line: Raw line content (without trailing newline).
+    :return: str
+    """
+    material = f"{input_path}|{line_no}|{raw_line}"
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
 def _blk_to_int(value: str) -> int:
     """
-    Convert an HDFS block id string to an integer.
+    Convert a DataXceiver block id string (blk_...) to an integer.
 
-    Format example:
-        blk_12345 -> 12345
-
-    :param value: Block id in the form "blk_<digits>".
+    :param value: Block id string.
     :return: int
     """
     return int(value.replace("blk_", ""))
-
-
-def _make_doc_receiving(groups: Dict[str, Any], ts) -> Dict[str, Any]:
-    """
-    Build a normalized MongoDB document for a Receiving event.
-
-    :param groups: Regex match group dictionary.
-    :param ts: Parsed UTC timestamp.
-    :return: Dict[str, Any]
-    """
-    return {
-        "logSet": LogType.HDFS_DATAXCEIVER,
-        "actionType": "receiving",
-        "ts": ts,
-        "day": day_str(ts),
-        "sourceIp": groups["src_receiving"],
-        "destIp": groups["dst_receiving"],
-        "blockId": _blk_to_int(groups["blk_receiving"]),
-        "sizeBytes": None,
-        "upvoteCount": 0,
-    }
-
-
-def _make_doc_received(groups: Dict[str, Any], ts) -> Dict[str, Any]:
-    """
-    Build a normalized MongoDB document for a Received event.
-
-    The log line may optionally contain a size field.
-
-    :param groups: Regex match group dictionary.
-    :param ts: Parsed UTC timestamp.
-    :return: Dict[str, Any]
-    """
-    size = int(groups["size_received"]) if groups.get("size_received") else None
-    return {
-        "logSet": LogType.HDFS_DATAXCEIVER,
-        "actionType": "received",
-        "ts": ts,
-        "day": day_str(ts),
-        "sourceIp": groups["src_received"],
-        "destIp": groups["dst_received"],
-        "blockId": _blk_to_int(groups["blk_received"]),
-        "sizeBytes": size,
-        "upvoteCount": 0,
-    }
-
-
-def _make_doc_served(groups: Dict[str, Any], ts) -> Dict[str, Any]:
-    """
-    Build a normalized MongoDB document for a Served event.
-
-    :param groups: Regex match group dictionary.
-    :param ts: Parsed UTC timestamp.
-    :return: Dict[str, Any]
-    """
-    return {
-        "logSet": LogType.HDFS_DATAXCEIVER,
-        "actionType": "served",
-        "ts": ts,
-        "day": day_str(ts),
-        "sourceIp": groups["src_served"],
-        "destIp": groups["dst_served"],
-        "blockId": _blk_to_int(groups["blk_served"]),
-        "sizeBytes": None,
-        "upvoteCount": 0,
-    }
-
-
-def _build_document(groups: Dict[str, Any], ts) -> Optional[Dict[str, Any]]:
-    """
-    Build the correct document variant based on which operation matched.
-
-    :param groups: Regex match group dictionary.
-    :param ts: Parsed UTC timestamp.
-    :return: Optional[Dict[str, Any]]
-    """
-    if groups.get("op_receiving"):
-        return _make_doc_receiving(groups, ts)
-    if groups.get("op_received"):
-        return _make_doc_received(groups, ts)
-    if groups.get("op_served"):
-        return _make_doc_served(groups, ts)
-    return None
 
 
 def parse_dataxceiver_worker(
@@ -150,57 +78,87 @@ def parse_dataxceiver_worker(
     batch_size: int,
 ) -> None:
     """
-    Parse an HDFS DataXceiver log file and insert entries into MongoDB.
+    Parse an HDFS DataXceiver log file and insert documents into MongoDB.
 
-    The function reads the log file line by line, matches DataXceiver patterns,
-    normalizes them into a single document schema, and inserts documents into
-    MongoDB in batches.
-
-    Lines that do not match the expected DataXceiver patterns are ignored.
-
-    :param input_path: Path to the HDFS DataXceiver log file.
+    :param input_path: Path to the input log file.
     :param mongo_uri: MongoDB connection URI.
-    :param mongo_db: Target MongoDB database name.
-    :param mongo_coll: Target MongoDB collection name.
-    :param batch_size: Number of documents per bulk insert.
+    :param mongo_db: MongoDB database name.
+    :param mongo_coll: MongoDB collection name.
+    :param batch_size: Maximum batch size for bulk writes.
     :return: None
     """
     client = MongoClient(mongo_uri)
-    collection = client[mongo_db][mongo_coll]
+    coll = client[mongo_db][mongo_coll]
 
     tiny_logger(f"[DATAX] start: {input_path}")
 
     batch: List[Dict[str, Any]] = []
-    total_lines = 0
-    matched_lines = 0
-    inserted_docs = 0
+    total = 0
+    matched = 0
+    inserted = 0
 
     with open(input_path, encoding="utf-8", errors="replace") as infile:
-        for raw_line in infile:
-            total_lines += 1
-            line = raw_line.rstrip("\n")
+        for line_no, raw in enumerate(infile, start=1):
+            total += 1
+            line = raw.rstrip("\n")
 
-            match = DATAX_REGEX.match(line)
-            if match is None:
+            m = DATAX_REGEX.match(line)
+            if not m:
                 continue
 
-            matched_lines += 1
-            groups = match.groupdict()
-            timestamp = ts_hdfs_compact(groups["date"], groups["time"])
+            matched += 1
+            g = m.groupdict()
+            ts = ts_hdfs_compact(g["date"], g["time"])
 
-            document = _build_document(groups, timestamp)
-            if document is None:
+            doc: Optional[Dict[str, Any]] = None
+
+            if g.get("op_receiving"):
+                doc = {
+                    "logSet": LogType.HDFS_DATAXCEIVER,
+                    "actionType": "receiving",
+                    "ts": ts,
+                    "day": day_str(ts),
+                    "sourceIp": g["src_receiving"],
+                    "destIp": g["dst_receiving"],
+                    "blockId": _blk_to_int(g["blk_receiving"]),
+                    "sizeBytes": None,
+                    "upvoteCount": 0,
+                }
+            elif g.get("op_received"):
+                size = int(g["size_received"]) if g.get("size_received") else None
+                doc = {
+                    "logSet": LogType.HDFS_DATAXCEIVER,
+                    "actionType": "received",
+                    "ts": ts,
+                    "day": day_str(ts),
+                    "sourceIp": g["src_received"],
+                    "destIp": g["dst_received"],
+                    "blockId": _blk_to_int(g["blk_received"]),
+                    "sizeBytes": size,
+                    "upvoteCount": 0,
+                }
+            elif g.get("op_served"):
+                doc = {
+                    "logSet": LogType.HDFS_DATAXCEIVER,
+                    "actionType": "served",
+                    "ts": ts,
+                    "day": day_str(ts),
+                    "sourceIp": g["src_served"],
+                    "destIp": g["dst_served"],
+                    "blockId": _blk_to_int(g["blk_served"]),
+                    "sizeBytes": None,
+                    "upvoteCount": 0,
+                }
+
+            if doc is None:
                 continue
 
-            batch.append(document)
+            doc["ingestKey"] = _ingest_key(input_path, line_no, line)
 
+            batch.append(doc)
             if len(batch) >= batch_size:
-                inserted_docs += flush_batch(collection, batch)
-                batch.clear()
+                inserted += flush_batch(coll, batch)
+                batch = []
 
-    inserted_docs += flush_batch(collection, batch)
-
-    tiny_logger(
-        f"[DATAX] done: matched {matched_lines}/{total_lines}, "
-        f"inserted {inserted_docs}"
-    )
+    inserted += flush_batch(coll, batch)
+    tiny_logger(f"[DATAX] done: matched {matched}/{total}, inserted {inserted}")

@@ -1,5 +1,6 @@
+import hashlib
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from pymongo import MongoClient
 
@@ -53,73 +54,31 @@ NAMESYS_ASK_REPLICATE_REGEX = re.compile(
 )
 
 
-def _parse_namesys_update(line: str) -> Optional[Dict[str, Any]]:
+def _ingest_key(input_path: str, line_no: int, raw_line: str) -> str:
     """
-    Parse a single FSNamesystem "blockMap updated" line into a document.
+    Build a deterministic per-line ingestion key.
 
-    :param line: Log line string.
-    :return: Optional[Dict[str, Any]]
+    :param input_path: Input file path.
+    :param line_no: 1-based line number.
+    :param raw_line: Raw line content (without trailing newline).
+    :return: str
     """
-    match = NAMESYS_UPDATE_REGEX.match(line)
-    if match is None:
-        return None
-
-    groups = match.groupdict()
-    timestamp = ts_hdfs_compact(groups["date"], groups["time"])
-    size = int(groups["size"]) if groups.get("size") else None
-
-    return {
-        "logSet": LogType.HDFS_NAMESYSTEM,
-        "actionType": "update",
-        "ts": timestamp,
-        "day": day_str(timestamp),
-        "sourceIp": None,
-        "destIp": groups["ip"],
-        "blockId": int(groups["block"]),
-        "sizeBytes": size,
-        "upvoteCount": 0,
-    }
+    material = f"{input_path}|{line_no}|{raw_line}"
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
-def _parse_namesys_replicate(line: str) -> Optional[List[Dict[str, Any]]]:
+def _ingest_key_with_suffix(input_path: str, line_no: int, raw_line: str, suffix: str) -> str:
     """
-    Parse a single FSNamesystem "ask ... to replicate" line into documents.
+    Build a deterministic ingestion key with a suffix for fan-out lines.
 
-    One document is produced per destination datanode.
-
-    :param line: Log line string.
-    :return: Optional[List[Dict[str, Any]]]
+    :param input_path: Input file path.
+    :param line_no: 1-based line number.
+    :param raw_line: Raw line content (without trailing newline).
+    :param suffix: Extra differentiator (e.g., dest_ip).
+    :return: str
     """
-    match = NAMESYS_ASK_REPLICATE_REGEX.match(line)
-    if match is None:
-        return None
-
-    groups = match.groupdict()
-    timestamp = ts_hdfs_compact(groups["date"], groups["time"])
-    src_ip = groups["src_ip"]
-    block_id = int(groups["block"])
-
-    docs: List[Dict[str, Any]] = []
-    for token in groups["dest_list"].split():
-        if ":" not in token:
-            continue
-        dest_ip = token.split(":", 1)[0]
-
-        docs.append(
-            {
-                "logSet": LogType.HDFS_NAMESYSTEM,
-                "actionType": "replicate",
-                "ts": timestamp,
-                "day": day_str(timestamp),
-                "sourceIp": src_ip,
-                "destIp": dest_ip,
-                "blockId": block_id,
-                "sizeBytes": None,
-                "upvoteCount": 0,
-            }
-        )
-
-    return docs
+    material = f"{input_path}|{line_no}|{raw_line}|{suffix}"
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
 def parse_namesystem_worker(
@@ -130,61 +89,86 @@ def parse_namesystem_worker(
     batch_size: int,
 ) -> None:
     """
-    Parse an HDFS FSNamesystem log file and insert entries into MongoDB.
+    Parse an HDFS FSNamesystem log file and insert documents into MongoDB.
 
-    The function reads the log file line by line and applies two patterns:
-        * blockMap updated events
-        * ask-to-replicate events (expanded to one doc per destination)
-
-    Documents are inserted into MongoDB in batches.
-
-    :param input_path: Path to the HDFS FSNamesystem log file.
+    :param input_path: Path to the input log file.
     :param mongo_uri: MongoDB connection URI.
-    :param mongo_db: Target MongoDB database name.
-    :param mongo_coll: Target MongoDB collection name.
-    :param batch_size: Number of documents per bulk insert.
+    :param mongo_db: MongoDB database name.
+    :param mongo_coll: MongoDB collection name.
+    :param batch_size: Maximum batch size for bulk writes.
     :return: None
     """
     client = MongoClient(mongo_uri)
-    collection = client[mongo_db][mongo_coll]
+    coll = client[mongo_db][mongo_coll]
 
     tiny_logger(f"[NAMESYS] start: {input_path}")
 
     batch: List[Dict[str, Any]] = []
-    total_lines = 0
-    matched_lines = 0
-    inserted_docs = 0
+    total = 0
+    matched = 0
+    inserted = 0
 
     with open(input_path, encoding="utf-8", errors="replace") as infile:
-        for raw_line in infile:
-            total_lines += 1
-            line = raw_line.strip()
+        for line_no, raw in enumerate(infile, start=1):
+            total += 1
+            line = raw.strip()
 
-            doc_update = _parse_namesys_update(line)
-            if doc_update is not None:
-                matched_lines += 1
-                batch.append(doc_update)
+            m_upd = NAMESYS_UPDATE_REGEX.match(line)
+            if m_upd:
+                matched += 1
+                g = m_upd.groupdict()
+                ts = ts_hdfs_compact(g["date"], g["time"])
+                size = int(g["size"]) if g.get("size") else None
 
+                doc = {
+                    "logSet": LogType.HDFS_NAMESYSTEM,
+                    "ingestKey": _ingest_key(input_path, line_no, line),
+                    "actionType": "update",
+                    "ts": ts,
+                    "day": day_str(ts),
+                    "sourceIp": None,
+                    "destIp": g["ip"],
+                    "blockId": int(g["block"]),
+                    "sizeBytes": size,
+                    "upvoteCount": 0,
+                }
+
+                batch.append(doc)
                 if len(batch) >= batch_size:
-                    inserted_docs += flush_batch(collection, batch)
-                    batch.clear()
-
+                    inserted += flush_batch(coll, batch)
+                    batch = []
                 continue
 
-            docs_repl = _parse_namesys_replicate(line)
-            if docs_repl is not None:
-                matched_lines += 1
+            m_rep = NAMESYS_ASK_REPLICATE_REGEX.match(line)
+            if m_rep:
+                matched += 1
+                g = m_rep.groupdict()
+                ts = ts_hdfs_compact(g["date"], g["time"])
+                src_ip = g["src_ip"]
+                block_id = int(g["block"])
 
-                for doc in docs_repl:
+                for token in g["dest_list"].split():
+                    if ":" not in token:
+                        continue
+                    dest_ip = token.split(":", 1)[0]
+
+                    doc = {
+                        "logSet": LogType.HDFS_NAMESYSTEM,
+                        "ingestKey": _ingest_key_with_suffix(input_path, line_no, line, dest_ip),
+                        "actionType": "replicate",
+                        "ts": ts,
+                        "day": day_str(ts),
+                        "sourceIp": src_ip,
+                        "destIp": dest_ip,
+                        "blockId": block_id,
+                        "sizeBytes": None,
+                        "upvoteCount": 0,
+                    }
+
                     batch.append(doc)
-
                     if len(batch) >= batch_size:
-                        inserted_docs += flush_batch(collection, batch)
-                        batch.clear()
+                        inserted += flush_batch(coll, batch)
+                        batch = []
 
-    inserted_docs += flush_batch(collection, batch)
-
-    tiny_logger(
-        f"[NAMESYS] done: matched {matched_lines}/{total_lines}, "
-        f"inserted {inserted_docs}"
-    )
+    inserted += flush_batch(coll, batch)
+    tiny_logger(f"[NAMESYS] done: matched {matched}/{total}, inserted {inserted}")
