@@ -1,53 +1,41 @@
 /* ============================================================
    MongoDB Analytics Queries – NoSQL-LOGS Project
    Database: nosql_logs
-   Matches current FastAPI analytics logic (Q1 to Q11)
+   Copy-paste friendly (no JS variables)
    ============================================================ */
 
 use nosql_logs;
 
-/* ------------------------------------------------------------
-   Common parameters (adjust if needed)
------------------------------------------------------------- */
-const start = ISODate("2008-11-09T00:00:00Z");
-const end   = ISODate("2008-11-11T23:59:59Z");
-const day   = "2008-11-09";
-
-const apacheStart = ISODate("2005-06-09T00:00:00Z");
-const apacheEnd   = ISODate("2006-02-28T23:59:59Z");
-
-const logSetForQ2 = "HDFS_DATAXCEIVER";
-const usernameForQ11 = "some_username";
-
 /* ============================================================
    Q1. Total logs per actionType in a time range (descending)
-   Matches: /analytics/logs-per-type
+   Time range: 2008-11-09 .. 2008-11-11 (UTC)
 ============================================================ */
-print("\nQ1: Total logs per actionType");
+print("\nQ1: Total logs per actionType (2008-11-09..2008-11-11)");
 db.logs.aggregate([
-  { $match: { ts: { $gte: start, $lte: end } } },
+  { $match: { ts: { $gte: ISODate("2008-11-09T00:00:00Z"), $lte: ISODate("2008-11-11T23:59:59Z") } } },
   { $group: { _id: "$actionType", total: { $sum: 1 } } },
   { $sort: { total: -1 } }
 ]).toArray();
 
 /* ============================================================
    Q2. Total requests per day for a logSet and time range
-   Matches: /analytics/requests-per-day
+   logSet: HDFS_DATAXCEIVER
+   Time range: 2008-11-09 .. 2008-11-11 (UTC)
 ============================================================ */
-print(`\nQ2: Requests per day (${logSetForQ2})`);
+print("\nQ2: Requests per day (HDFS_DATAXCEIVER, 2008-11-09..2008-11-11)");
 db.logs.aggregate([
-  { $match: { logSet: logSetForQ2, ts: { $gte: start, $lte: end } } },
+  { $match: { logSet: "HDFS_DATAXCEIVER", ts: { $gte: ISODate("2008-11-09T00:00:00Z"), $lte: ISODate("2008-11-11T23:59:59Z") } } },
   { $group: { _id: "$day", total: { $sum: 1 } } },
   { $sort: { _id: 1 } }
 ]).toArray();
 
 /* ============================================================
    Q3. Three most common logs per source IP for a day
-   Matches: /analytics/top3-per-sourceip
+   Day: 2008-11-09
 ============================================================ */
-print("\nQ3: Top 3 logs per source IP");
+print("\nQ3: Top 3 logs per source IP (day=2008-11-09)");
 db.logs.aggregate([
-  { $match: { day: day, sourceIp: { $ne: null } } },
+  { $match: { day: "2008-11-09", sourceIp: { $ne: null } } },
   { $addFields: {
       sig: {
         $cond: [
@@ -72,11 +60,11 @@ db.logs.aggregate([
 
 /* ============================================================
    Q4. Two least common HTTP methods in a time range
-   Matches: /analytics/least-http-methods
+   Time range: 2005-06-09 .. 2006-02-28 (UTC)
 ============================================================ */
-print("\nQ4: Two least common HTTP methods");
+print("\nQ4: Two least common HTTP methods (2005-06-09..2006-02-28)");
 db.logs.aggregate([
-  { $match: { logSet: "ACCESS", ts: { $gte: apacheStart, $lte: apacheEnd } } },
+  { $match: { logSet: "ACCESS", ts: { $gte: ISODate("2005-06-09T00:00:00Z"), $lte: ISODate("2006-02-28T23:59:59Z") } } },
   { $group: { _id: "$access.method", cnt: { $sum: 1 } } },
   { $sort: { cnt: 1 } },
   { $limit: 2 }
@@ -84,7 +72,6 @@ db.logs.aggregate([
 
 /* ============================================================
    Q5. Referrers leading to more than one resource
-   Matches: /analytics/referrers-multi-resource
 ============================================================ */
 print("\nQ5: Referrers with multiple resources");
 db.logs.aggregate([
@@ -97,14 +84,12 @@ db.logs.aggregate([
 
 /* ============================================================
    Q6. Blocks replicated and served on the same day
-   Matches intended behavior of: /analytics/blocks-replicated-and-served
-   Note: your current API code has day filter commented out, but the
-   project query requires "same day", so this keeps the day filter.
+   Day: 2008-11-09
 ============================================================ */
-print("\nQ6: Blocks replicated and served same day");
+print("\nQ6: Blocks replicated and served same day (day=2008-11-09)");
 db.logs.aggregate([
   { $match: {
-      day: day,
+      day: "2008-11-09",
       logSet: { $in: ["HDFS_NAMESYSTEM", "HDFS_DATAXCEIVER"] },
       actionType: { $in: ["replicate", "served"] },
       blockId: { $ne: null }
@@ -122,15 +107,14 @@ db.logs.aggregate([
 ]).toArray();
 
 /* ============================================================
-   Q7. Fifty most upvoted logs for a specific day
-   Matches: /analytics/top-upvoted-logs
+   Q7. Fifty most upvoted logs for a day
+   Day: 2008-11-09
 ============================================================ */
-print("\nQ7: Top 50 upvoted logs");
-db.logs.find({ day: day }).sort({ upvoteCount: -1 }).limit(50).toArray();
+print("\nQ7: Top 50 upvoted logs (day=2008-11-09)");
+db.logs.find({ day: "2008-11-09" }).sort({ upvoteCount: -1 }).limit(50).toArray();
 
 /* ============================================================
    Q8. Fifty most active administrators by total upvotes
-   Matches: /analytics/top-admins-upvotes
 ============================================================ */
 print("\nQ8: Top admins by total upvotes");
 db.admins.find(
@@ -140,7 +124,6 @@ db.admins.find(
 
 /* ============================================================
    Q9. Top 50 admins by number of distinct source IPs voted
-   Matches: /analytics/top-admins-sourceips
 ============================================================ */
 print("\nQ9: Top admins by distinct source IPs");
 db.upvotes.aggregate([
@@ -156,7 +139,6 @@ db.upvotes.aggregate([
 
 /* ============================================================
    Q10. Logs where the same email used with more than one username
-   Matches: /analytics/logs-multi-username-per-email
 ============================================================ */
 print("\nQ10: Logs where same email used with multiple usernames");
 db.upvotes.aggregate([
@@ -186,11 +168,11 @@ db.upvotes.aggregate([
 
 /* ============================================================
    Q11. Block IDs voted by a given username
-   Matches: /analytics/blockids-voted
+   Username: "some_username"
 ============================================================ */
-print("\nQ11: Block IDs voted by a username");
+print("\nQ11: Block IDs voted by usernameUsed='some_username'");
 db.upvotes.aggregate([
-  { $match: { usernameUsed: usernameForQ11 } },
+  { $match: { usernameUsed: "some_username" } },
   { $unwind: "$blockIds" },
   { $group: { _id: "$blockIds" } },
   { $sort: { _id: 1 } },
