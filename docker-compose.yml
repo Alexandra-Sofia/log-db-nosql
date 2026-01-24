@@ -47,5 +47,18 @@ services:
         echo "$(ts) | Pipeline: END."
       '
 
+  api:
+    build: ./api
+    container_name: logdb_api
+    ports:
+      - "8000:8000"
+    environment:
+      MONGO_URI: "mongodb://mongo:27017"
+      MONGO_DB: "nosql_logs"
+    depends_on:
+      - mongo
+    restart: "no"
+
+
 volumes:
   mongo_data:
