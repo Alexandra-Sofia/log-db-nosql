@@ -1,0 +1,67 @@
+services:
+  mongo:
+    image: mongo:7
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_DATABASE: nosql_logs
+    volumes:
+      - mongo_data:/data/db
+
+  runner:
+    build: ./db
+    environment:
+      MONGO_URI: "mongodb://mongo:27017"
+      MONGO_DB: "nosql_logs"
+      MONGO_COLLECTION: "logs"
+      LOG_DIR: "/input-logfiles"
+      N_ADMINS: "1500"
+      EXTRA_VOTE_FRAC: "0.20"
+      ADMIN_CAP: "1000"
+      MODE: "fail"
+      SEED: "42"
+      PYTHONPATH: "/app"
+      VOTE_INSERT_BATCH_SIZE: "20000"
+      COVERAGE_CURSOR_BATCH_SIZE: "100000"
+      COVERAGE_PROGRESS_EVERY: "200000"
+      EXTRA_POOL_MAX: "200000"
+    depends_on:
+      - mongo
+    volumes:
+      - ./input-logfiles:/input-logfiles:ro
+    command: >
+      bash -lc '
+        set -e
+        ts() { date "+%Y-%m-%d %H:%M:%S.%3N"; }
+
+        echo "$(ts) | Pipeline: START."
+
+        echo "$(ts) | Ingest step deployment: START."
+        python ingest/execute.py
+        echo "$(ts) | Ingest step deployment: END."
+
+        echo "$(ts) | Seed step deployment: START."
+        python seed/execute.py
+        echo "$(ts) | Seed step deployment: END."
+
+        echo "$(ts) | Pipeline: END."
+      '
+
+  api:
+    build: ./api
+    container_name: logdb_api
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./api:/app
+    environment:
+      WATCHFILES_FORCE_POLLING: "true"
+      MONGO_URI: "mongodb://mongo:27017"
+      MONGO_DB: "nosql_logs"
+    depends_on:
+      - mongo
+    restart: "no"
+
+
+volumes:
+  mongo_data:
