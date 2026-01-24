@@ -179,7 +179,9 @@ def ensure_core_indexes(ctx: SeedContext) -> None:
     tiny_logger("[SEED][INDEXES] Ensuring core indexes...")
 
     ctx.col.admins.create_index([("username", 1)], unique=True, name="uniq_username")
+    ctx.col.admins.create_index([("email", 1)], name="email")
     ctx.col.upvotes.create_index([("adminId", 1), ("logId", 1)], unique=True, name="uniq_admin_log_vote")
+    ctx.col.upvotes.create_index([("usernameUsed", 1), ("logId", 1),("emailUsed", 1)], name="admin_logid_username_used")
     ctx.col.logs.create_index([("day", 1), ("upvoteCount", -1)], name="day_upvotes_desc")
     ctx.col.logs.create_index([("upvoteCount", 1)], name="upvoteCount")
 

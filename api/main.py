@@ -357,7 +357,7 @@ def q6_blocks_replicated_and_served(day: str = Query(..., description="YYYY-MM-D
     """
     pipeline = [
         {"$match": {
-            "day": day,
+            # "day": day,
             "logSet": {"$in": ["HDFS_NAMESYSTEM", "HDFS_DATAXCEIVER"]},
             "actionType": {"$in": ["replicate", "served"]},
             "blockId": {"$ne": None},
@@ -369,6 +369,7 @@ def q6_blocks_replicated_and_served(day: str = Query(..., description="YYYY-MM-D
         }},
         {"$match": {"hasReplicate": 1, "hasServed": 1}},
         {"$project": {"_id": 0, "day": "$_id.day", "blockId": "$_id.blockId"}},
+        {"$sort": {"day": -1}},
     ]
     return {"results": to_jsonable(list(logs.aggregate(pipeline)))}
 
@@ -430,14 +431,30 @@ def q10_logs_multi_username_per_email() -> dict[str, Any]:
     :return: dict[str, Any]
     """
     pipeline = [
-        {"$group": {"_id": "$emailUsed", "usernames": {"$addToSet": "$usernameUsed"}, "logIds": {"$addToSet": "$logId"}}},
-        {"$project": {"usernameCount": {"$size": "$usernames"}, "usernames": 1, "logIds": 1}},
-        {"$match": {"usernameCount": {"$gt": 1}}},
-        {"$unwind": "$logIds"},
-        {"$group": {"_id": "$logIds", "emails": {"$addToSet": "$_id"}}},
-        {"$lookup": {"from": "logs", "localField": "_id", "foreignField": "_id", "as": "log"}},
-        {"$unwind": "$log"},
-        {"$project": {"logId": {"$toString": "$_id"}, "emails": 1, "log": "$log"}},
+        {"$group": {
+            "_id": {
+                "email": "$emailUsed",
+                "logId": "$logId"
+            },
+            "usernames": {"$addToSet": "$usernameUsed"}
+        }},
+        {"$match": {
+            "$expr": { "$gt": [{ "$size": "$usernames" }, 1] }
+        }},
+        {"$lookup": {
+            "from": "logs",
+            "localField": "_id.logId",
+            "foreignField": "_id",
+            "as": "logDetails"
+        }},
+        {"$unwind": "$logDetails"},
+        {"$project": {
+            "_id": 0,
+            "flaggedEmail": "$_id.email",
+            "logId": { "$toString": "$_id.logId" },
+            "usernamesUsed": "$usernames",
+            "logContent": "$logDetails"
+        }}
     ]
     return {"results": to_jsonable(list(upvotes.aggregate(pipeline)))}
 
