@@ -5180,32 +5180,27 @@ db.upvotes.aggregate([
 ]).toArray();
 // results
 resultsQ10 = [
-    {
-        "flaggedEmail": "hbaird@example.net",
-        "logId": "69743a0672096bfb9be54954",
-        "usernamesUsed": [
-            "alex2",
-            "alex",
-            "chad41"
-        ],
-        "logContent": {
-            "_id": {
-                "$oid": "69743a0672096bfb9be54954"
-            },
+     {
+          "flaggedEmail": "alex@alex.al",
+          "logId": "6974afd5f04b4864d68be087",
+          "usernamesUsed": [
+            "alexandra",
+            "alex"
+          ],
+          "logContent": {
+            "_id": "6974afd5f04b4864d68be087",
             "logSet": "HDFS_NAMESYSTEM",
-            "ingestKey": "d56767366f36784e247b8eab2853e76fea6fe5a323601280285243cd5beade30",
+            "ingestKey": "57171b35ec4c67cceca4d3a00637604259400b059606ad7fc7eb93882de3caae",
             "actionType": "update",
-            "ts": {
-                "$date": "2008-11-09T20:35:19Z"
-            },
+            "ts": "2008-11-09T20:46:01",
             "day": "2008-11-09",
             "sourceIp": null,
-            "destIp": "10.250.10.6",
-            "blockId": -1608999687919862800,
-            "sizeBytes": 91178,
-            "upvoteCount": 4
+            "destIp": "10.251.125.237",
+            "blockId": 6952230797247766000,
+            "sizeBytes": 67108864,
+            "upvoteCount": 11
         }
-    }
+     }
 ];
 
 
@@ -5213,7 +5208,7 @@ resultsQ10 = [
    Q11. Block IDs voted by a given username
    Username: "some_username"
 ============================================================ */
-print("\nQ11: Block IDs voted by usernameUsed='some_username'");
+print("\nQ11: Block IDs voted by usernameUsed='alex'");
 db.upvotes.aggregate([
     { $match: { usernameUsed: "alex" } },
     { $unwind: "$blockIds" },
@@ -5224,7 +5219,7 @@ db.upvotes.aggregate([
 // results
 resultsQ11 = [
     {
-        "blockId": -1608999687919862800
+        "blockId": 6952230797247766000
     }
 ];
 

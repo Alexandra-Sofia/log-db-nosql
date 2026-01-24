@@ -1,236 +1,247 @@
-# NoSQL-LOGS Project
+# NoSQL-LOGS Ingestion & Querying Pipeline
 
-## Overview
+This README covers:
+- Directory structure
+- Schema overview (included below)
+- Parsing logic
+- File formats
+- Ingestion workflow
+- Docker Compose usage
+- REST API overview
+- Development notes
 
-This project implements a MongoDB-based log ingestion, seeding, and analytics system for large-scale system logs.
-It is designed to ingest millions of log entries efficiently, enrich them with metadata, enforce consistency
-constraints, and expose analytics through a REST API.
-
-The project follows clean code principles, emphasizes safe re-execution of ingestion, and is structured to scale
-to multi-million-record datasets.
-
----
-
-## Architecture
-
-The system consists of four main parts:
-
-1. Ingest
-   - Parses raw log files.
-   - Normalizes them into structured MongoDB documents.
-   - Uses multiprocessing and batched inserts.
-   - Prevents duplicate log insertion across restarts.
-
-2. Seed
-   - Generates administrators using Faker.
-   - Generates upvotes under strict constraints.
-   - Guarantees:
-     - At least one third of logs have at least one upvote
-     - No administrator has more than 1000 upvotes
-
-3. API
-   - REST API built with FastAPI.
-   - Provides analytics queries required by the assignment.
-   - Performs controlled writes for logs, admins, and upvotes.
-
-4. Infrastructure
-   - Docker and Docker Compose based.
-   - Single MongoDB instance.
-   - One runner container executing ingest and then seed sequentially.
+#### 🔧 System Requirements
+- Docker Engine or Docker Desktop
+- Docker Compose v
+- Unix based OS
 
 ---
 
-## Data Model (MongoDB)
+## 1. Overview
 
-### Collections
+NoSQL-LOGS is a high‑performance log ingestion, seeding, and analytics pipeline designed for large heterogeneous server logs.
+It provides an end‑to‑end workflow that parses raw log files, normalizes them into structured MongoDB documents,
+and exposes analytics through a REST API.
 
-### logs
-Represents ingested log entries.
+The system processes three log categories:
+
+1. **Apache/HTTP ACCESS logs**
+2. **HDFS DataXceiver logs**
+3. **HDFS NameSystem logs**
+
+The pipeline:
+- Parses logs using parallel worker processes.
+- Normalizes log formats into a unified schema.
+- Inserts data in large batches for performance.
+- Seeds administrators and upvotes under strict constraints.
+- Exposes required analytics queries via FastAPI.
+- Is fully containerized and deployed via Docker Compose.
+
+---
+
+## 2. Directory Structure
+
+```
+.
+├── Dockerfile
+├── README.md
+├── docker-compose.yml
+├── ingest/                 # Log ingestion logic
+│   ├── execute.py
+│   ├── indexes.py
+│   └── workers/            # Parsers per log type
+│       ├── access_worker.py
+│       ├── dataxceiver_worker.py
+│       └── namesystem_worker.py
+├── seed/                   # Admin and upvote generation
+│   └── execute.py
+├── api/                    # FastAPI service
+│   ├── main.py
+│   ├── schemas.py
+│   └── db.py
+├── util/                   # Shared utilities
+├── input-logfiles/         # Raw log files
+└── requirements.txt
+```
+
+---
+
+## 3. MongoDB Schema Overview
+
+### logs collection
+Stores all ingested log entries in a unified format.
 
 Fields:
-- _id
-- logSet
-- ingestKey
-- ts
-- day
-- actionType
-- sourceIp
-- destIp
-- blockId
-- sizeBytes
-- upvoteCount
+- `_id` (ObjectId)
+- `logSet` (ACCESS | HDFS_DATAXCEIVER | HDFS_NAMESYSTEM)
+- `ingestKey` (string, unique per logSet)
+- `ts` (datetime, UTC)
+- `day` (YYYY-MM-DD string)
+- `actionType` (HTTP method or HDFS action)
+- `sourceIp` (string, optional)
+- `destIp` (string, optional)
+- `blockId` (int, optional)
+- `sizeBytes` (int, optional)
+- `access` (subdocument, ACCESS only)
+- `upvoteCount` (int)
 
-### admins
-Represents administrators who can cast upvotes.
+Justification:
+A single collection simplifies cross-log analytics while optional fields
+allow heterogeneous log types without joins.
 
-Fields:
-- _id
-- username (unique)
-- email (unique)
-- phone
-- totalUpvotes
-
-### upvotes
-Represents admin votes on logs.
+### admins collection
+Represents administrators who cast upvotes.
 
 Fields:
-- _id
-- adminId
-- logId
-- ts
-- day
-- usernameUsed
-- emailUsed
-- sourceIp
-- blockIds
+- `_id`
+- `username` (unique)
+- `email` (unique)
+- `phone`
+- `totalUpvotes`
+
+### upvotes collection
+Represents administrator votes on logs.
+
+Fields:
+- `_id`
+- `adminId`
+- `logId`
+- `ts`
+- `day`
+- `usernameUsed`
+- `emailUsed`
+- `sourceIp`
+- `blockIds` (array)
+
+Denormalized fields are stored to support analytics without joins.
 
 ---
 
-## Ingestion Design
+## 4. Ingestion Workflow
 
-### Duplicate Prevention Strategy
+### A. Parse and ingest logs
+Executed inside the ingest container:
 
-Each log document includes the fields:
-(logSet, ingestKey)
+```
+python execute.py
+```
 
-The ingestKey is a SHA-256 hash derived from:
-input_path | line_number | raw_line
+Three worker processes run in parallel:
 
-A unique compound index on (logSet, ingestKey) ensures that the same log line is not inserted more than once.
+| Worker | Input File | Notes |
+|------|-----------|-------|
+| ACCESS | access_log_full | Parses HTTP metadata |
+| DATAX | HDFS_DataXceiver.log | receiving / received / served |
+| NAMESYS | HDFS_FS_Namesystem.log | update / replicate |
 
-This guarantees:
-- Restarting Docker Compose does not duplicate logs
-- Ingestion can be safely re-run without clearing the database
-- Partial ingestion failures do not corrupt existing data
+Each worker:
+- Parses lines using regex
+- Normalizes fields
+- Inserts documents in large batches
 
-### Performance Techniques
+Indexes are created **after ingestion** to maximize throughput.
 
-- Multiprocessing per log type
-- insert_many with ordered=False
-- Large batch sizes
-- Index creation after ingestion completes
-- No per-line existence checks
-
----
-
-## Seeding Logic
-
-### Admin Generation
-- Uses Faker
-- Controlled via environment variables
-- Skips generation if admins already exist
-
-### Upvote Constraints
-- At least one third of all logs receive one or more upvotes
-- No admin exceeds 1000 total upvotes
-- Deterministic random seed for reproducibility
-- Batched writes with admin-cap enforcement
+### B. Duplicate protection
+Each log includes an `ingestKey` derived from file path, line number, and content.
+A unique index on `(logSet, ingestKey)` prevents duplicate insertion across restarts.
 
 ---
 
-## API
+## 5. Seeding Workflow
+
+The seed step runs after ingestion:
+
+- Generates administrators using Faker.
+- Generates upvotes with constraints:
+  - ≥ 1/3 of logs receive at least one upvote
+  - No admin exceeds 1000 upvotes
+- Uses deterministic randomness for reproducibility.
+
+---
+
+## 6. REST API
+
+The FastAPI service exposes:
 
 ### Health
-GET /health
+- `GET /health`
 
 ### Writes
-- POST /insert-logs
-- POST /create-admin
-- POST /cast-upvote
+- `POST /insert-logs`
+- `POST /create-admin`
+- `POST /cast-upvote`
 
-### Analytics Endpoints
-The API implements all required analytics queries, including:
+### Analytics
+Endpoints implement all required queries, including:
 - Logs per type
 - Requests per day
 - Top actions per source IP
-- Least used HTTP methods
+- Least common HTTP methods
 - Referrers with multiple resources
-- Replicated and served blocks
+- Blocks replicated and served the same day
 - Top upvoted logs
-- Top admins by upvotes
+- Top administrators by upvotes
 - Admins by distinct source IPs
-- Logs associated with multiple usernames per email
-- Block IDs voted by a given admin
+- Logs with multiple usernames per email
+- Block IDs voted by a given username
+
+### API Access
+
+Once Docker Compose is running, the REST API is available at:
+
+http://localhost:8000
+
+Interactive API documentation (Swagger UI):
+
+http://localhost:8000/docs
+
 
 ---
 
-## Indexing Strategy
+## 7. Docker Compose Usage
 
-Indexes are explicitly created for:
-- Time-based analytics
-- Grouping by day
-- Sorting by upvotes
-- Preventing duplicate ingestion
-- Administrator uniqueness
-- Efficient aggregation pipelines
+Start the full pipeline:
 
-Indexes are created once ingestion finishes, to maximize ingestion throughput.
-
----
-
-## Project Structure
-
-db/
-- ingest/
-- seed/
-- api/
-- util/
-- Dockerfile
-- docker-compose.yml
-- README.md
-
----
-
-## Running the Project
-
-Start everything:
+```
 docker compose up --build
+```
 
-This will:
-1. Start MongoDB
-2. Run ingestion
-3. Run seeding
-4. Start the API
+This:
+1. Starts MongoDB
+2. Runs ingestion
+3. Runs seeding
+4. Starts the API
 
-Reset all data:
+Reset everything:
+
+```
 docker compose down -v
-
-This removes MongoDB volumes and forces a clean run.
-
----
-
-## Design Principles Applied
-
-- Clean Code
-- Single responsibility per module
-- Deterministic execution for grading
-- Database-enforced duplicate prevention
-- Explicit indexing strategy
-- No hidden side effects
+```
 
 ---
 
-## Assignment Compliance
+## 8. Development Notes
 
-- Large-scale ingestion of millions of logs
-- Administrator data generated with Faker
-- At least one third of logs have at least one upvote
-- No administrator has more than 1000 upvotes
-- Full analytics coverage
-- REST API
-- Dockerized and reproducible setup
-
----
-
-## Notes
-
-- Ingestion is append-safe and restart-safe.
-- Seeding assumes ingestion has completed successfully.
-- Index build failures indicate real data duplication issues.
+- Ingestion is restart-safe due to database-level uniqueness.
+- Index build failures indicate real duplicate data.
+- The schema is designed to favor read-heavy analytics workloads.
+- Adding a new log type requires:
+  - New parser
+  - Field mapping
+  - Optional analytics extensions
 
 ---
 
-## Author
+## 9. License
 
-Developed as part of M149 – Database Management Systems
-University of Athens
+Internal academic project. No license.
+
+---
+
+## 10. Author
+
+NoSQL-LOGS ingestion, MongoDB schema design, seeding logic, and FastAPI analytics
+developed by Sofia, Alexandra 
+2025
+
+---
