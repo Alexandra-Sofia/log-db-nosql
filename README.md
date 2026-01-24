@@ -12,8 +12,8 @@ This README covers:
 
 #### 🔧 System Requirements
 - Docker Engine or Docker Desktop
-- Docker Compose v
-- Unix based OS
+- Docker Compose v2
+- Unix based Docker Host
 
 ---
 
@@ -43,25 +43,44 @@ The pipeline:
 
 ```
 .
-├── Dockerfile
-├── README.md
-├── docker-compose.yml
-├── ingest/                 # Log ingestion logic
-│   ├── execute.py
-│   ├── indexes.py
-│   └── workers/            # Parsers per log type
-│       ├── access_worker.py
-│       ├── dataxceiver_worker.py
-│       └── namesystem_worker.py
-├── seed/                   # Admin and upvote generation
-│   └── execute.py
-├── api/                    # FastAPI service
-│   ├── main.py
-│   ├── schemas.py
-│   └── db.py
-├── util/                   # Shared utilities
-├── input-logfiles/         # Raw log files
-└── requirements.txt
+├── README.md                     # Project documentation
+├── docker-compose.yml            # Orchestrates MongoDB, ingest/seed runner, and API
+├── example-api-calls.sh          # Example curl commands for API analytics endpoints
+├── queries.mongodb.js            # MongoDB shell queries (Q1–Q11)
+├── queries_and_results.mongodb.js# MongoDB queries with sample outputs
+├── input-logfiles                # Raw input log files for ingestion
+│   ├── access_log_full           # Apache/HTTP access logs
+│   ├── HDFS_DataXceiver.log      # HDFS DataXceiver logs
+│   ├── HDFS_FS_Namesystem.log    # HDFS NameSystem logs
+│   └── logs.tar.gz               # Archived copy of the original datasets
+├── api                           # FastAPI service exposing analytics and write endpoints
+│   ├── Dockerfile                # API container definition
+│   ├── requirements.txt          # API Python dependencies
+│   ├── db.py                     # MongoDB connection setup
+│   ├── schemas.py                # Pydantic models for requests and validation
+│   └── main.py                   # API entry point and analytics endpoints (Q1–Q11)
+├── db                            # Database-related logic (ingest and seed)
+│   ├── Dockerfile                # Runner container for ingest + seed
+│   ├── requirements.txt          # Shared Python dependencies
+│   ├── __init__.py
+│   ├── ingest                    # Log ingestion pipeline
+│   │   ├── config.py             # Ingestion configuration and defaults
+│   │   ├── execute.py            # Ingest entry point (spawns workers, builds indexes)
+│   │   ├── indexes.py            # MongoDB index definitions
+│   │   ├── timestamps.py         # Timestamp parsing and normalization helpers
+│   │   ├── util.py               # Shared utilities and enums
+│   │   ├── writer.py             # Batched MongoDB insert logic
+│   │   └── workers               # Dedicated parsers per log type
+│   │       ├── access_worker.py  # Apache ACCESS log parser
+│   │       ├── dataxceiver_worker.py # HDFS DataXceiver log parser
+│   │       └── namesystem_worker.py  # HDFS NameSystem log parser
+│   └── seed                      # Database seeding logic
+│       ├── common.py             # Shared seed utilities and configuration
+│       ├── execute.py            # Seed entry point (admins + upvotes)
+│       ├── admins.py             # Administrator generation (Faker-based)
+│       ├── upvotes.py            # Upvote generation with coverage and cap constraints
+│       └── tiny_logger.py        # Minimal timestamped logging utility
+
 ```
 
 ---
@@ -157,6 +176,64 @@ The seed step runs after ingestion:
   - No admin exceeds 1000 upvotes
 - Uses deterministic randomness for reproducibility.
 
+### Example Execution flow for the ingest and seed scripts:
+
+Output from `docker logs -f  log-db-nosql-runner-1`
+
+```commandline
+2026-01-24 11:41:08.250 | Pipeline: START.
+2026-01-24 11:41:08.252 | Ingest step deployment: START.
+2026-01-24 11:41:08.925 | [INGEST] logdir=/input-logfiles
+2026-01-24 11:41:08.925 | [INGEST] collection=nosql_logs.logs
+2026-01-24 11:41:08.925 | [INGEST] Starting workers...
+2026-01-24 11:41:08.955 | [DATAX] start: /input-logfiles/HDFS_DataXceiver.log
+2026-01-24 11:41:08.955 | [NAMESYS] start: /input-logfiles/HDFS_FS_Namesystem.log
+2026-01-24 11:41:08.956 | [ACCESS] start: /input-logfiles/access_log_full
+2026-01-24 11:41:10.603 | [ACCESS] done: matched 36044/36310, inserted 36044
+2026-01-24 11:42:15.881 | [NAMESYS] done: matched 1726743/3700245, inserted 1726908
+2026-01-24 11:42:19.216 | [DATAX] done: matched 2159055/2518678, inserted 2159055
+2026-01-24 11:42:19.220 | [INGEST] Workers succeeded. Creating indexes...
+2026-01-24 11:43:10.309 | [INGEST] Index creation complete. Ingest finished.
+2026-01-24 11:43:10.814 | Ingest step deployment: END.
+2026-01-24 11:43:10.816 | Seed step deployment: START.
+2026-01-24 11:43:11.625 | [SEED] START
+2026-01-24 11:43:11.625 | [SEED] MODE=fail SEED=42 DB=nosql_logs
+2026-01-24 11:43:11.629 | [SEED][INDEXES] Ensuring core indexes...
+2026-01-24 11:43:16.791 | [SEED][INDEXES] Core indexes ensured.
+2026-01-24 11:43:18.107 | [SEED][ADMINS] Generating 1500 administrators...
+2026-01-24 11:43:18.619 | [SEED][ADMINS] Inserted 1500 admins.
+2026-01-24 11:43:19.917 | [SEED] After admins: logs=3922007 admins=1500 upvotes=0 inserted_admins=1500
+2026-01-24 11:43:19.917 | [SEED][UPVOTES] START
+2026-01-24 11:43:21.189 | [SEED][UPVOTES] Logs: 3922007
+2026-01-24 11:43:21.189 | [SEED][UPVOTES] Admins: 1500
+2026-01-24 11:43:21.189 | [SEED][UPVOTES] Existing upvotes: 0
+2026-01-24 11:43:21.189 | [SEED][UPVOTES] Covered logs now: 0 (need at least 1307336)
+2026-01-24 11:43:21.189 | [SEED][UPVOTES] Need additional covered logs: 1307336
+2026-01-24 11:43:21.189 | [SEED][UPVOTES] Target total votes: 2091738 (EXTRA_VOTE_FRAC=0.2)
+2026-01-24 11:43:21.198 | [SEED][UPVOTES] Ensuring coverage: inserting at least 1307336 new votes on 0-vote logs...
+2026-01-24 11:43:27.596 | [SEED][UPVOTES] Coverage progress: 200000/1307336
+2026-01-24 11:43:38.822 | [SEED][UPVOTES] Coverage progress: 400000/1307336
+2026-01-24 11:43:49.277 | [SEED][UPVOTES] Coverage progress: 600000/1307336
+2026-01-24 11:43:58.899 | [SEED][UPVOTES] Coverage progress: 800000/1307336
+2026-01-24 11:44:11.328 | [SEED][UPVOTES] Coverage progress: 1000000/1307336
+2026-01-24 11:44:24.046 | [SEED][UPVOTES] Coverage progress: 1200000/1307336
+2026-01-24 11:44:31.694 | [SEED][UPVOTES] Coverage step complete: inserted 1307336 votes.
+2026-01-24 11:44:31.698 | [SEED][UPVOTES] Adding extra votes for richness: remaining=192664
+2026-01-24 11:44:31.698 | [SEED][UPVOTES] Building sampling pool of logs (pool_size=200000)...
+2026-01-24 11:44:43.516 | [SEED][UPVOTES] Extra vote step complete.
+2026-01-24 11:44:43.563 | [SEED][UPVOTES] Recomputing counters from upvotes collection...
+2026-01-24 11:45:48.092 | [SEED][UPVOTES] Updated logs.upvoteCount for 1307336 logs.
+2026-01-24 11:45:49.298 | [SEED][UPVOTES] Updated admins.totalUpvotes for 1500 admins.
+2026-01-24 11:45:50.053 | [SEED][UPVOTES] Inserted votes this run: 1498507
+2026-01-24 11:45:50.053 | [SEED][UPVOTES] Logs with >=1 upvote: 1307336 (required >= 1307336)
+2026-01-24 11:45:50.053 | [SEED][UPVOTES] Max admin totalUpvotes: 1000 (cap 1000)
+2026-01-24 11:45:50.053 | [SEED][UPVOTES] END
+2026-01-24 11:45:52.671 | [SEED] After upvotes: logs=3922007 admins=1500 upvotes=1498507 inserted_votes=1498507
+2026-01-24 11:45:52.671 | [SEED] END
+2026-01-24 11:45:53.146 | Seed step deployment: END.
+2026-01-24 11:45:53.149 | Pipeline: END.
+```
+
 ---
 
 ## 6. REST API
@@ -222,6 +299,7 @@ docker compose down -v
 
 ## 8. Development Notes
 
+- All three log files need to be manually copied to the input-logfiles directory.
 - Ingestion is restart-safe due to database-level uniqueness.
 - Index build failures indicate real duplicate data.
 - The schema is designed to favor read-heavy analytics workloads.

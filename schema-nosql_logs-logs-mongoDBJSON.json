@@ -1,0 +1,96 @@
+{
+  "$jsonSchema": {
+    "bsonType": "object",
+    "required": [
+      "_id",
+      "actionType",
+      "blockId",
+      "day",
+      "destIp",
+      "logSet",
+      "sizeBytes",
+      "sourceIp",
+      "ts",
+      "upvoteCount"
+    ],
+    "properties": {
+      "_id": {
+        "bsonType": "objectId"
+      },
+      "access": {
+        "bsonType": "object",
+        "properties": {
+          "authUser": {
+            "bsonType": "string"
+          },
+          "method": {
+            "bsonType": "string"
+          },
+          "referrer": {
+            "bsonType": "string"
+          },
+          "remoteName": {
+            "bsonType": "string"
+          },
+          "resource": {
+            "bsonType": "string"
+          },
+          "status": {
+            "bsonType": "int"
+          },
+          "userAgent": {
+            "bsonType": "string"
+          }
+        },
+        "required": [
+          "authUser",
+          "method",
+          "referrer",
+          "remoteName",
+          "resource",
+          "status",
+          "userAgent"
+        ]
+      },
+      "actionType": {
+        "bsonType": "string"
+      },
+      "blockId": {
+        "bsonType": [
+          "long",
+          "null"
+        ]
+      },
+      "day": {
+        "bsonType": "string"
+      },
+      "destIp": {
+        "bsonType": [
+          "string",
+          "null"
+        ]
+      },
+      "logSet": {
+        "bsonType": "string"
+      },
+      "sizeBytes": {
+        "bsonType": [
+          "null",
+          "int"
+        ]
+      },
+      "sourceIp": {
+        "bsonType": [
+          "string",
+          "null"
+        ]
+      },
+      "ts": {
+        "bsonType": "date"
+      },
+      "upvoteCount": {
+        "bsonType": "int"
+      }
+    }
+  }
+}
