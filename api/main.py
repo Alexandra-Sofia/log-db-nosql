@@ -264,7 +264,7 @@ def q2_requests_per_day(
     pipeline = [
         {"$match": {"logSet": logSet, "ts": {"$gte": start, "$lte": end}}},
         {"$group": {"_id": "$day", "total": {"$sum": 1}}},
-        {"$sort": {"_id": 1}},
+        {"$sort": {"_id": -1}},
     ]
     return {"results": to_jsonable(list(logs.aggregate(pipeline)))}
 

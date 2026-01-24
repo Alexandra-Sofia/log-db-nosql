@@ -25,8 +25,8 @@ class AccessFields(BaseModel):
 
 class BaseLogCreate(BaseModel):
     ts: datetime
-    sourceIp: Optional[IPvAnyAddress] = None
-    destIp: Optional[IPvAnyAddress] = None
+    sourceIp: Optional[str] = None
+    destIp: Optional[str] = None
     blockId: Optional[int] = None
     sizeBytes: Optional[int] = None
 

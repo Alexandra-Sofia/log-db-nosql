@@ -23,7 +23,6 @@ def ensure_indexes(db: Database, logs_coll: str = "logs") -> None:
     logs.create_index([("blockId", 1), ("day", 1), ("actionType", 1)], name="block_day_action")
 
     admins.create_index([("username", 1)], unique=True, name="uniq_username")
-    admins.create_index([("email", 1)], unique=True, name="uniq_email")
 
     upvotes.create_index([("adminId", 1), ("logId", 1)], unique=True, name="uniq_admin_log_vote")
 
