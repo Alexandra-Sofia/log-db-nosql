@@ -52,6 +52,8 @@ services:
     container_name: logdb_api
     ports:
       - "8000:8000"
+    volumes:
+      - ./api:/app
     environment:
       MONGO_URI: "mongodb://mongo:27017"
       MONGO_DB: "nosql_logs"
