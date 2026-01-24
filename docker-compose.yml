@@ -55,6 +55,7 @@ services:
     volumes:
       - ./api:/app
     environment:
+      WATCHFILES_FORCE_POLLING: "true"
       MONGO_URI: "mongodb://mongo:27017"
       MONGO_DB: "nosql_logs"
     depends_on:
